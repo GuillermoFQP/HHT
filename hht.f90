@@ -1,4 +1,4 @@
-! Hilbert-Huang transform for HEALPix maps
+! Hilbert-Huang transform for HEALPix maps (in development)
 
 program hht
 
