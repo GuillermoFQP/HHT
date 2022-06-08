@@ -8,47 +8,47 @@ implicit none
 
 !===============================================================
 real(DP), allocatable          :: map_in(:,:), map_out(:,:,:)
-integer                        :: nside, npix, nmaps, ord, n, imfmax, itermax, i
-real(DP)                       :: radius, phi
+integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stiff
 character(len=80)              :: fin, arg, header(43)
 character(len=80), allocatable :: fout(:)
 !===============================================================
 type it1; real(DP), allocatable :: RES(:), IMF(:); end type
-type it2; real(DP), allocatable :: MI(:), MH(:), Emax(:), Emin(:), Emean(:); end type
+type it2; real(DP), allocatable :: MI(:), Emax(:), Emin(:); end type
 !===============================================================
 
 ! Show help information
-if (nArguments() == 1) then
-	call getArgument(1, fin)
-	if (fin == "-help" .or. fin == "-h") then; call info(); stop; end if
-	call fatal_error("Cannot parse argument.")
-end if
-
-! Show error message if there are not enough arguments
-if (nArguments() <= 5) then; call info(); call fatal_error('Not enough arguments.'); end if
-
-! Reading input parameters
-call getArgument(1, fin)                      ! Input file name
-call getArgument(2, arg); read(arg,*) radius  ! Radius in arcminutes
-call getArgument(3, arg); read(arg,*) imfmax  ! Number of IMFs
-call getArgument(4, arg); read(arg,*) itermax ! Number of iterations in the EMD
-call getArgument(5, arg); read(arg,*) phi     ! Tension parameter
-
-! Show error message if there are not enough arguments
-if (nArguments() < 5+2*imfmax+2) call fatal_error('Not enough arguments.')
-if (nArguments() > 5+2*imfmax+2) call fatal_error('Too many arguments.')
-
-! Reading output file names
-allocate(fout(2*imfmax+2)); do i = 1, 2*imfmax+2; call getArgument(i+5, fout(i)); end do
-
-! Radius from arcminutes to radians
-radius = (radius/60)*(pi/180) 
+select case (nArguments())
+	case (1)
+		call getArgument(1, arg); if (arg == "-h") then; call usage(); stop; end if
+		call fatal_error("Cannot parse argument.")
+	case (3)
+		call getArgument(1, arg); if (arg /= "-lext") call fatal_error("Cannot parse argument.")
+		call getArgument(2, fin)
+		call getArgument(3, arg); read(arg,*) stiff ! Stiffness
+		
+		! Output file names
+		ch = 4; allocate(fout(ch))
+		do i = 1, ch; write (fout(i),'("extrema",I0,".fits")') i; end do
+	case (4)
+		! Input parameters
+		call getArgument(1, fin)                    ! Input file name
+		call getArgument(2, arg); read(arg,*) imf   ! Number of IMFs
+		call getArgument(3, arg); read(arg,*) nit   ! Number of iterations in the EMD
+		call getArgument(4, arg); read(arg,*) stiff ! Stiffness
+		
+		! Output file names
+		ch = 2*imf; allocate(fout(ch))
+		do i = 1, imf; write (fout(i),'("imf",I0,".fits")') i; end do
+		do i = imf+1, ch; write (fout(i),'("res",I0,".fits")') i; end do
+	case default
+		call fatal_error("Invalid number of arguments.")
+end select
 
 ! Parameters of the FITS file containing the input map
 npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord); n = nside2npix(nside) - 1
 
 ! Allocating arrays
-allocate(map_in(0:n,nmaps), map_out(0:n,nmaps,2*imfmax), source=0.0)
+allocate(map_in(0:n,nmaps), map_out(0:n,nmaps,ch), source=0.0)
 
 ! Reading input map
 call input_map(fin, map_in, npix, nmaps)
@@ -57,23 +57,30 @@ write (*,*) "Map read successfully."
 ! All subroutines are designed for maps with nested ordering
 if (ord == 1) call convert_ring2nest(nside, map_in)
 
-! Empirical mode decomposition
-call emd(map_in(:,1), nside, radius, imfmax, itermax, phi, map_out(:,1,:))
-write (*,*) "Empirical Mode Decomposition completed successfully."
+! Find extrema or perforn empirical mode decomposition
+if (nArguments() == 3) then
+	call extrema(nside, map_in(:,1), stiff, map_out(:,1,:))
+	write (*,*) "Extrema and envelopes obtained successfully."
+else
+	call emd(nside, map_in(:,1), imf, nit, stiff, map_out(:,1,:))
+	write (*,*) "Empirical Mode Decomposition completed successfully."
+end if
 
 ! Go back to ring ordering if necessary
-if (ord == 1) then; do i = 1, 2*imfmax; call convert_nest2ring(nside, map_out(:,:,i)); end do; end if
+if (ord == 1) then
+	call convert_nest2ring(nside, map_in)
+	do i = 1, ch; call convert_nest2ring(nside, map_out(:,:,i)); end do
+end if
 
 ! Generating output files
 call write_minimal_header(header, 'map', nside=nside, order=ord)
-do i = 1, 2*imfmax; call output_map(map_out(:,:,i), header, fout(i)); end do
+do i = 1, ch; call output_map(map_out(:,:,i), header, fout(i)); end do
 
-! Generating file containing the sum of IMFs
-call output_map(map_out(:,:,2*imfmax)+sum(map_out(:,:,1:imfmax),dim=3), header, fout(2*imfmax+1))
-
-! Generating residual file
-call output_map(map_in-map_out(:,:,2*imfmax)-sum(map_out(:,:,1:imfmax),dim=3), header, fout(2*imfmax+2))
-
+! Generating file containing the EMD and the residual
+if (nArguments() == 4) then
+	call output_map(map_out(:,:,2*imf)+sum(map_out(:,:,1:imf),dim=3), header, "emd.fits")
+	call output_map(map_in-map_out(:,:,2*imf)-sum(map_out(:,:,1:imf),dim=3), header, "res.fits")
+end if
 write (*,*) "Output files generated successfully."
 
 deallocate(map_in, map_out, fout)
@@ -81,96 +88,103 @@ deallocate(map_in, map_out, fout)
 contains
 
 ! Empirical Mode Decomposition process
-subroutine emd(map_in, nside, radius, imfmax, itermax, phi, map_out)
-	integer, intent(in)   :: nside, imfmax, itermax
-	real(DP), intent(in)  :: map_in(0:12*nside**2-1), radius, phi
-	real(DP), intent(out) :: map_out(0:12*nside**2-1,imfmax)
-	integer               :: i, j, n, l, p, q, nlist, nmax, nmin, imax(12*nside**2/8), imin(12*nside**2/8), list(8)
-	real(DP)              :: eps, neigh(8), z1(0:12*nside**2-1), z2(0:12*nside**2-1)
-	type(it1)             :: EMD1(imfmax)
-	type(it2)             :: EMD2(imfmax,itermax)
+subroutine emd(nside, map_in, imf, nit, stiff, map_out)
+	integer, intent(in)   :: nside, imf, nit, stiff
+	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
+	real(DP), intent(out) :: map_out(0:12*nside**2-1,2*imf)
+	integer               :: i, j, n, nlist, nmax, nmin, imax(12*nside**2/8), imin(12*nside**2/8)
+	real(DP)              :: eps
+	type(it1)             :: EMD1(imf)
+	type(it2)             :: EMD2(imf,nit)
 	
 	n   = nside2npix(nside) - 1
-	l   = nside2npix(nside) * sin(radius/2.0)**2
 	eps = 0.01 * sum(map_in) / (n+1)
 	
 	! IMF number
-	do i = 1, imfmax
-		write (*,'("- Computing Intrinsic Mode Function", X, I1, X, "out of", X, I1, ".")') i, imfmax
+	do i = 1, imf
+		write (*,'("- Computing Intrinsic Mode Function", X, I2, X, "out of", X, I2, ".")') i, imf
 		
-		allocate(EMD1(i)%IMF(0:n), EMD1(i)%RES(0:n), source=0.0)
+		allocate(EMD1(i)%IMF(0:n), source=0.0)
 		
 		! Iteration number
-		do j = 1, itermax
-			write (*,'("-- Iteration in progress:", X, I1, X, "out of", X, I1, ".")') j, itermax
+		do j = 1, nit
+			write (*,'("-- Iteration in progress:", X, I2, X, "out of", X, I2, ".")') j, nit
 			
-			allocate(EMD2(i,j)%MI(0:n), EMD2(i,j)%MH(0:n), source=0.0)
-			allocate(EMD2(i,j)%Emax(0:n), EMD2(i,j)%Emin(0:n), EMD2(i,j)%Emean(0:n), source=0.0)
+			allocate(EMD2(i,j)%MI(0:n), EMD2(i,j)%Emax(0:n), EMD2(i,j)%Emin(0:n), source=0.0)
 			
 			! To find the first IMF, start with the map itself as input signal
 			if (i == 1 .and. j == 1) EMD2(i,j)%MI = map_in
 			! To find the next IMF, now use the residue as input signal
-			if (i /= 1 .and. j == 1) EMD2(i,j)%MI = EMD1(i-1)%RES
+			if (i /= 1 .and. j == 1) EMD2(i,j)%MI = EMD2(i-1,1)%MI - EMD1(i-1)%IMF
 			! Repeat the process with the resulting signal from the last step as input signal
-			if (j /= 1) EMD2(i,j)%MI = EMD2(i,j-1)%MH
-			
-			!EMD2(i,j)%Emin = HPX_DBADVAL; EMD2(i,j)%Emax = HPX_DBADVAL
-			
-			! Local extrema counter
-			nmin = 0; nmax = 0
+			if (j /= 1) EMD2(i,j)%MI = EMD2(i,j-1)%MI - (EMD2(i,j-1)%Emax + EMD2(i,j-1)%Emin) / 2.0
 			
 			! Finding the positions and values of the local extrema of the input map
-			do p = 0, n
-				! Pixel indices of a neighborhood around "p"
-				call neighbours_nest(nside, p, list, nlist)
-				
-				! Pixel values of the neighborhood around "p"
-				forall (q = 1:nlist) neigh(q) = EMD2(i,j)%MI(list(q))
-				
-				! Indices of the data for the upper envelope
-				if (EMD2(i,j)%MI(p) >= maxval(neigh(1:nlist))) then; nmax = nmax + 1; imax(nmax) = p; end if
-				
-				! Indices of the data for the lower envelope
-				if (EMD2(i,j)%MI(p) <= minval(neigh(1:nlist))) then; nmin = nmin + 1; imin(nmin) = p; end if
-				
-			end do
+			call local_extrema(nside, EMD2(i,j)%MI, nmax, nmin, imax, imin)
 			
-			! Interpolation by convolution with the inverse Laplacian of a Gaussian beam (not finished)
-			!call interpolate(nside, 4*nside, nmax, EMD2(i,j)%MI(imax(1:nmax)), 120.0, imax(1:nmax), EMD2(i,j)%Emax)
-			!call interpolate(nside, 3*nside, nmin, EMD2(i,j)%MI(imin(1:nmin)), 120.0, imin(1:nmin), EMD2(i,j)%Emin)
-			
-			! Interpolation subroutine to compute the smooth envelopes
-			!$OMP PARALLEL DO
-			do p = 0, n
-				call rst_interp(nside, EMD2(i,j)%MI(imax(1:nmax)), nmax, imax(1:nmax), p, radius*i, phi, EMD2(i,j)%Emax(p))
-				call rst_interp(nside, EMD2(i,j)%MI(imin(1:nmin)), nmin, imin(1:nmin), p, radius*i, phi, EMD2(i,j)%Emin(p))
-			end do
-			!$OMP END PARALLEL DO
-			
-			! Computing the mean of the upper envelope and the lower envelope
-			EMD2(i,j)%Emean = (EMD2(i,j)%Emax + EMD2(i,j)%Emin) / 2.0
-			
-			! Subtracting the envelope mean signal from the input signal
-			EMD2(i,j)%MH = EMD2(i,j)%MI - EMD2(i,j)%Emean
+			! Compute the smooth envelopes (interpolation by spherical spline with stiffness)
+			call ss_interp(nside, 100, stiff, nmax, EMD2(i,j)%MI(imax(1:nmax)), imax(1:nmax), EMD2(i,j)%Emax)
+			call ss_interp(nside, 100, stiff, nmin, EMD2(i,j)%MI(imin(1:nmin)), imin(1:nmin), EMD2(i,j)%Emin)
 		end do
 		
 		! The IMF is defined as the result from the last iteration over "j"
-		EMD1(i)%IMF = EMD2(i,itermax)%MH
-		
-		! The residue is defined as
-		EMD1(i)%RES = EMD2(i,1)%MI - EMD1(i)%IMF
+		EMD1(i)%IMF = EMD2(i,nit)%MI - (EMD2(i,nit)%Emax + EMD2(i,nit)%Emin) / 2.0
 		
 	end do
 	
-	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	! Minima and maxima, after defining the arrays minima(0:12*nside**2-1) and maxima(0:12*nside**2-1)
-	!minima = HPX_DBADVAL; do p = 1, nmin; minima(imin(p)) = map_in(imin(p)); end do
-	!maxima = HPX_DBADVAL; do p = 1, nmax; maxima(imax(p)) = map_in(imax(p)); end do
-	!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	
-	do i = 1, imfmax; map_out(:,i) = EMD1(i)%IMF; map_out(:,i+4) = EMD1(i)%RES; end do
+	do i = 1, imf; map_out(:,i) = EMD1(i)%IMF; map_out(:,i+imf) = EMD2(i,1)%MI - EMD1(i)%IMF; end do
 	
 end subroutine emd
+
+! Empirical Mode Decomposition process
+subroutine extrema(nside, map_in, stiff, map_out)
+	integer, intent(in)   :: nside, stiff
+	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
+	real(DP), intent(out) :: map_out(0:12*nside**2-1,4)
+	integer               :: nmax, nmin, imax(12*nside**2/8), imin(12*nside**2/8)
+	
+	! Local extrema counter
+	nmin = 0; nmax = 0
+	
+	! Finding the positions and values of the local extrema of the input map
+	call local_extrema(nside, map_in, nmax, nmin, imax, imin)
+	
+	! Minima and maxima
+	map_out(:,1) = HPX_DBADVAL; forall (i=1:nmax) map_out(imax(i),2) = map_in(imax(i))
+	map_out(:,2) = HPX_DBADVAL; forall (i=1:nmin) map_out(imin(i),1) = map_in(imin(i))
+	
+	! Compute the smooth envelopes (interpolation by spherical spline with stiffness)
+	call ss_interp(nside, 100, stiff, nmax, map_in(imax(1:nmax)), imax(1:nmax), map_out(:,3))
+	call ss_interp(nside, 100, stiff, nmin, map_in(imin(1:nmin)), imin(1:nmin), map_out(:,4))
+	
+end subroutine extrema
+
+! Positions and values of the local extrema of an input map
+subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
+	integer, intent(in)  :: nside
+	real(DP), intent(in) :: map_in(0:12*nside**2-1)
+	integer, intent(out) :: nmax, nmin, imax(12*nside**2/8), imin(12*nside**2/8)
+	integer              :: n, p, q, nlist, list(8)
+	real(DP)             :: neigh(8)
+	
+	n = nside2npix(nside) - 1
+	
+	! Local extrema counter
+	nmin = 0; nmax = 0
+	
+	do p = 0, n
+		! Pixel indices of a neighborhood around "p"
+		call neighbours_nest(nside, p, list, nlist)
+		
+		! Pixel values of the neighborhood around "p"
+		forall (q = 1:nlist) neigh(q) = map_in(list(q))
+		
+		! Find local extrema
+		if (map_in(p) >= maxval(neigh(1:nlist))) then; nmax = nmax + 1; imax(nmax) = p; end if
+		if (map_in(p) <= minval(neigh(1:nlist))) then; nmin = nmin + 1; imin(nmin) = p; end if
+	end do
+	
+end subroutine local_extrema
 
 ! Local interpolation by regularized spline with tension (Mitášová & Mitáš, 1993)
 subroutine rst_interp(nside, lut, next, iext, pix, radius, phi, z)
@@ -179,7 +193,7 @@ subroutine rst_interp(nside, lut, next, iext, pix, radius, phi, z)
 	real(DP), intent(out) :: z
 	real(DP)              :: vpix(3)
 	real(DP), allocatable :: A(:,:), B(:), v(:,:)
-	integer               :: le(next), nle, i, j, l, nlist, info
+	integer               :: le(next), nle, i, j, l, nlist
 	integer, allocatable  :: list(:), lutext(:)
 	
 	l = nside2npix(nside) * sin(radius/2.0)**2
@@ -219,113 +233,83 @@ subroutine rst_interp(nside, lut, next, iext, pix, radius, phi, z)
 	
 end subroutine rst_interp
 
-! Generate the beam window function in multipole space of the inverse Laplacian of a Gaussian beam parametrized by its FWHM
-subroutine il_gaussbeam(fwhm, lmax, wlm)
-	integer, intent(in)   :: lmax
-	real(DP), intent(in)  :: fwhm ! In arcminutes
-	real(DP), intent(out) :: wlm(0:lmax)
-	integer               :: l
-	real(DP)              :: gaussian_wlm(0:lmax,1)
+! Global interpolation by spherical spline (Perrin et al, 1988)
+subroutine ss_interp(nside, lmax, stiff, next, lut, iext, map_out)
+	integer, intent(in)   :: nside, lmax, stiff, next, iext(next)
+	real(DP), intent(in)  :: lut(next)
+	real(DP), intent(out) :: map_out(0:12*nside**2-1)
+	real(DP)              :: A(next,next), B(next), v(3,next)
+	integer               :: i, j, p, n
+	real                  :: start, finish
 	
-	call gaussbeam(fwhm, lmax, gaussian_wlm)
+	n = nside2npix(nside) - 1
 	
-	wlm(0) = 0.0; forall (l=1:lmax) wlm(l) = gaussian_wlm(l,1) / (l*(l+1))
-end subroutine il_gaussbeam
+	! Vector coordinates of the extrema in "le"
+	do i = 1, next; call pix2vec_nest(nside, iext(i), v(:,i)); end do
+	
+	! Computing "A" and "B"
+	A(:,1) = 1.0; B = lut; forall (i=1:next, j=2:next) A(i,j) = G(v(:,i),v(:,j-1),lmax,stiff) - G(v(:,i),v(:,next),lmax,stiff)
+	
+	! Interpolation coefficients "X=A^(-1)*B"
+	call lsolve(next, A, B)
+	
+	! Interpolated value at pixel "p"
+	call cpu_time(start)
+	!$OMP PARALLEL DO
+	do p = 0, n; call ss_interp_val(nside, p, lmax, stiff, next, A, B, v, map_out); end do
+	!$OMP END PARALLEL DO
+	call cpu_time(finish)
+	
+	! Show execution time
+	write (*,*) "Time to compute interpolated values (in seconds):", finish - start
+	
+end subroutine ss_interp
 
-! Sample beam function on a specified grid of "x=cos(theta)"
-subroutine sample_beam(lmax, bl, n, f, nside)
-	integer, intent(in)  :: nside, lmax, n
-	real(DP), intent(in) :: bl(0:lmax)
-	real(DP)             :: f(n), wlm(0:lmax,1), x(n), P(n,0:2), S(n)
-	integer              :: i, l
+! Interpolated value at pixel "p"
+subroutine ss_interp_val(nside, p, lmax, stiff, next, A, B, v, map_out)
+	integer, intent(in)   :: nside, p, lmax, stiff, next
+	real(DP), intent(in)  :: A(next,next), B(next), v(3,next)
+	real(DP), intent(out) :: map_out(0:12*nside**2-1)
+	real(DP)              :: vp(3)
+	integer               :: i
 	
-	! Initialize sampling grid
-	forall (i=1:n) x(i) = dble(2*i-n-1) / (n-1)
+	call pix2vec_nest(nside, p, vp)
 	
-	! Initialize beam convolved with delta function and pixel window
-	wlm = 1.0; call pixel_window(wlm, nside, "pixel_window_n0064.fits")
-	forall (l=0:lmax) wlm(l,:) = (2*l+1) / (4.0*pi) * bl(l) * wlm(l,:)
+	map_out(p) = B(1); do i = 1, next-1; map_out(p) = map_out(p) + B(i+1) * G(vp,v(:,i),lmax,stiff); end do
+	map_out(p) = map_out(p) - sum(B(2:next)) * G(vp,v(:,next),lmax,stiff)
 	
-	! Start Legendre recursion
-	P(:,0) = 1.0; P(:,1) = x
-	S = wlm(0,1)*P(:,0) + wlm(1,1)*P(:,1)
-	
-	! Sum up "Y_{l0}" harmonic series
-	do l = 2, lmax
-		P(:,mod(l,3)) = ((2*l-1)*x*P(:,mod(l-1,3)) - (l-1)*P(:,mod(l-2,3))) / l
-		S = S + wlm(l,1)*P(:,mod(l,3))
-	end do
-	
-	! Return normalized beam
-	f = S
-	
-end subroutine sample_beam
+end subroutine ss_interp_val
 
-! Linear interpolation on interval "[a,b]" using a uniformly spaced LUT
-pure function linterp1d(n, lut, a, b, x)
-	integer, intent(in)  :: n
-	real(DP), intent(in) :: lut(n), a, b, x
-	integer              :: i
-	real(DP)             :: w, linterp1d
+! Basis function for interpolation by spherical spline
+pure function G(v1, v2, lmax, stiff)
+	integer, intent(in)   :: lmax, stiff
+	real(DP), intent(in)  :: v1(3), v2(3)
+	real(DP)              :: v3(3), P(0:lmax), S(1:lmax), theta, G
+	integer               :: i
 	
-	! Index in lookup table
-	w = (x-a)/(b-a)*(n-1)
-	i = min(max(floor(w)+1, 1), n-1)
-	w = w - dble(i-1)
+	! Vectorial product 
+	v3(1) = v1(2) * v2(3) - v1(3) * v2(2)
+	v3(2) = v1(3) * v2(1) - v1(1) * v2(3)
+	v3(3) = v1(1) * v2(2) - v1(2) * v2(1)
 	
-	! Linear combination of LUT values
-	linterp1d = (1.0-w) * lut(i) + w * lut(i+1)
+	! Angular distance
+	theta = atan2(norm2(v3), dot_product(v1,v2))
 	
-end function
+	! Array containing Legrendre polynomials up to order "lmax" evaluated at "cos(theta)"
+	P = fleg(cos(theta), lmax+1)
+	
+	! Summands
+	forall (i=1:lmax) S(i) = P(i) * dble(2*i+1) / (i*(i+1))**stiff
+	
+	! Sum
+	G = (1.0/4*pi) * sum(S)
+	
+end function G
 
-! Interpolate scattered values using specified beam and locations
-subroutine interpolate(nside, lmax, n, lut, fwhm, pixels, map_out)
-	integer, intent(in)            :: nside, lmax, n, pixels(n)
-	real(DP), intent(in)           :: lut(n), fwhm
-	real(DP), intent(out)          :: map_out(0:12*nside**2-1)
-	integer                        :: i, j, l, samples, stat
-	real(DP)                       :: avg
-	integer, allocatable           :: p(:)
-	complex(DPC), allocatable      :: alm(:,:,:)
-	real(DP), allocatable          :: bl(:), kernel(:), v(:,:), A(:,:), B(:)
-	real, parameter                :: rad2arcmin = 60*180/pi
-	
-	! Allocate storage
-	allocate(bl(0:lmax), alm(1,0:lmax,0:lmax), v(3,n), A(n,n), B(n))
-	
-	! Process interpolation kernel
-	call il_gaussbeam(fwhm, lmax, bl)
-	
-	samples = 16*nside; allocate(kernel(samples))
-	call sample_beam(lmax, bl, samples, kernel, nside)
-	
-	! Sample positions
-	do i = 1, n; call pix2vec_nest(nside, pixels(i), v(:,i)); end do
-	
-	! Build kernel overlap matrix
-	B = lut; avg = sum(B)/n; B = (B - avg) * (12*nside**2) / (4.0*pi)
-	forall (i=1:n, j=1:n) A(i,j) = linterp1d(samples, kernel, -1.0, 1.0, sum(v(:,i)*v(:,j)))
-	
-	! Solve "A*X=B"
-	call lsolve(n, A, B)
-	
-	! Inject kernel amplitudes into an emty map
-	map_out = 0.0; map_out(pixels) = B
-	
-	! Convolve injected pixels with intepolation kernel
-	call map2alm(nside, lmax, lmax, map_out, alm)
-	forall (l=0:lmax) alm(:,l,0:l) = bl(l) * alm(:,l,0:l)
-	alm(:,0,0) = sqrt(4.0*pi) * avg
-	call alm2map(nside, lmax, lmax, alm, map_out)
-	
-	deallocate(alm, bl, kernel, v, A, B)
-
-end subroutine interpolate
-
-! Radial basis function for interpolation
+! Radial basis function for interpolation by regularized spline
 pure function R(v1, v2, phi) 
 	real(DP), intent(in) :: v1(3), v2(3), phi
-	real(DP)             :: v3(3), r12, R
+	real(DP)             :: v3(3), theta, R
 
 	if (all(v1 == v2)) then; R = 0.0; return; end if
 	
@@ -335,11 +319,9 @@ pure function R(v1, v2, phi)
 	v3(3) = v1(1) * v2(2) - v1(2) * v2(1)
 	
 	! Angular distance
-	r12 = atan2(norm2(v3), dot_product(v1,v2))
+	theta = atan2(norm2(v3), dot_product(v1,v2))
 	
-	!call angdist(v1, v2, r12)
-	
-	R = - log((phi*r12/2.0)**2) - expint(1,(phi*r12/2.0)**2) - EULER
+	R = - log((phi*theta/2.0)**2) - expint(1,(phi*theta/2.0)**2) - EULER
 
 end function R
 
@@ -404,6 +386,26 @@ pure function expint(n, x)
 
 end function expint
 
+! Fitting routine for an expansion with "nl" Legendre polynomials evaluated at "x" from Numerical Recipes
+pure function fleg(x, nl)
+	real(DP), intent(in) :: x
+	integer, intent(in)  :: nl
+	real(DP)             :: fleg(nl), d, f1, f2, twox
+	integer              :: j
+	
+	fleg(1) = 1.0; fleg(2) = x
+	
+	if (nl > 2) then
+		twox = 2.0 * x; f2 = x; d = 1.0
+		
+		do j = 3, nl
+			f1 = d; f2 = f2 + twox; d = d + 1.0
+			fleg(j) = (f2 * fleg(j-1) - f1 * fleg(j-2)) / d
+		end do
+	end if
+	
+end function fleg
+
 ! Array of given length containing an arithmetic progression
 pure function arth(first, increment, length)
 	integer, intent(in) :: first, increment, length
@@ -431,18 +433,18 @@ subroutine lsolve(n, A, B)
 	
 	! Stop the program if necessary
 	if(stat /= 0) call fatal_error('Singular matrix in lsolve()')
+	
 end subroutine lsolve
 
-subroutine info()
-	write (*,*) "Usage: hht IFN RAD IMF NIT PHI OF1 OF2 OF3 ... SUM RES"
+subroutine usage()
+	write (*,'(/,A)') "Usage:"
+	write (*,*) "For Hilbert-Huang transform: hht IFN IMF NIT STF"
+	write (*,*) "For finding local extrema: hht -lext IFN STF"
 	write (*,*) "IFN = Input file name"
-	write (*,*) "RAD = Radius in arcminutes"
 	write (*,*) "IMF = Number of Intrinsic Mode Functions"
 	write (*,*) "NIT = Number of iterations in the Empirical Mode Decomposition"
-	write (*,*) "PHI = Tension parameter"
-	write (*,*) "OFN = Nth output file name"
-	write (*,*) "SUM = Name of the output file containing the sum of the Intrinsic Mode Functions"
-	write (*,*) "RES = Residual file name"
-end subroutine info
+	write (*,*) "STF = Stiffness"
+	
+end subroutine usage
 
 end program
