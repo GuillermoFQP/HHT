@@ -39,7 +39,7 @@ select case (nArguments())
 		! Output file names
 		ch = 2*imf; allocate(fout(ch))
 		do i = 1, imf; write (fout(i),'("imf",I0,".fits")') i; end do
-		do i = imf+1, ch; write (fout(i),'("res",I0,".fits")') i; end do
+		do i = imf+1, ch; write (fout(i),'("res",I0,".fits")') i - imf; end do
 	case default
 		call fatal_error("Invalid number of arguments.")
 end select
@@ -261,7 +261,7 @@ subroutine ss_interp(nside, lmax, stiff, next, lut, iext, map_out)
 	call cpu_time(finish)
 	
 	! Show execution time
-	write (*,*) "Time to compute interpolated values (in seconds):", finish - start
+	write (*,*) "   Time to compute interpolated values (in seconds):", finish - start
 	
 end subroutine ss_interp
 
