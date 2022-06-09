@@ -11,6 +11,7 @@ real(DP), allocatable          :: map_in(:,:), map_out(:,:,:)
 integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stiff
 character(len=80)              :: fin, arg, header(43)
 character(len=80), allocatable :: fout(:)
+integer, parameter             :: nLeg = 50 ! Number of Legendre polynomials for the spherical spline interpolation.
 !===============================================================
 type it1; real(DP), allocatable :: RES(:), IMF(:); end type
 type it2; real(DP), allocatable :: MI(:), Emax(:), Emin(:); end type
@@ -58,6 +59,7 @@ write (*,*) "Map read successfully."
 if (ord == 1) call convert_ring2nest(nside, map_in)
 
 ! Find extrema or perforn empirical mode decomposition
+write (*,'(X,"Using ",I0," Legendre polynomials for the interpolation with stiffness parameter ",I0,".")') nLeg, stiff
 if (nArguments() == 3) then
 	call extrema(nside, map_in(:,1), stiff, map_out(:,1,:))
 	write (*,*) "Extrema and envelopes obtained successfully."
@@ -102,13 +104,13 @@ subroutine emd(nside, map_in, imf, nit, stiff, map_out)
 	
 	! IMF number
 	do i = 1, imf
-		write (*,'("- Computing Intrinsic Mode Function", X, I2, X, "out of", X, I2, ".")') i, imf
+		write (*,'(X, "- Computing Intrinsic Mode Function ", I0, " out of ", I0, ".")') i, imf
 		
 		allocate(EMD1(i)%IMF(0:n), source=0.0)
 		
 		! Iteration number
 		do j = 1, nit
-			write (*,'("-- Iteration in progress:", X, I2, X, "out of", X, I2, ".")') j, nit
+			write (*,'(X, "-- Iteration in progress: " I0, " out of ", I0, ".")') j, nit
 			
 			allocate(EMD2(i,j)%MI(0:n), EMD2(i,j)%Emax(0:n), EMD2(i,j)%Emin(0:n), source=0.0)
 			
@@ -123,8 +125,8 @@ subroutine emd(nside, map_in, imf, nit, stiff, map_out)
 			call local_extrema(nside, EMD2(i,j)%MI, nmax, nmin, imax, imin)
 			
 			! Compute the smooth envelopes (interpolation by spherical spline with stiffness)
-			call ss_interp(nside, 100, stiff, nmax, EMD2(i,j)%MI(imax(1:nmax)), imax(1:nmax), EMD2(i,j)%Emax)
-			call ss_interp(nside, 100, stiff, nmin, EMD2(i,j)%MI(imin(1:nmin)), imin(1:nmin), EMD2(i,j)%Emin)
+			call ss_interp(nside, nLeg, stiff, nmax, EMD2(i,j)%MI(imax(1:nmax)), imax(1:nmax), EMD2(i,j)%Emax)
+			call ss_interp(nside, nLeg, stiff, nmin, EMD2(i,j)%MI(imin(1:nmin)), imin(1:nmin), EMD2(i,j)%Emin)
 		end do
 		
 		! The IMF is defined as the result from the last iteration over "j"
@@ -143,19 +145,20 @@ subroutine extrema(nside, map_in, stiff, map_out)
 	real(DP), intent(out) :: map_out(0:12*nside**2-1,4)
 	integer               :: nmax, nmin, imax(12*nside**2/8), imin(12*nside**2/8)
 	
-	! Local extrema counter
-	nmin = 0; nmax = 0
-	
 	! Finding the positions and values of the local extrema of the input map
 	call local_extrema(nside, map_in, nmax, nmin, imax, imin)
 	
 	! Minima and maxima
-	map_out(:,1) = HPX_DBADVAL; forall (i=1:nmax) map_out(imax(i),2) = map_in(imax(i))
-	map_out(:,2) = HPX_DBADVAL; forall (i=1:nmin) map_out(imin(i),1) = map_in(imin(i))
+	write (*,*) "- Finding local maxima."
+	map_out(:,1) = HPX_DBADVAL; forall (i=1:nmax) map_out(imax(i),1) = map_in(imax(i))
+	write (*,*) "- Finding local minima."
+	map_out(:,2) = HPX_DBADVAL; forall (i=1:nmin) map_out(imin(i),2) = map_in(imin(i))
 	
 	! Compute the smooth envelopes (interpolation by spherical spline with stiffness)
-	call ss_interp(nside, 100, stiff, nmax, map_in(imax(1:nmax)), imax(1:nmax), map_out(:,3))
-	call ss_interp(nside, 100, stiff, nmin, map_in(imin(1:nmin)), imin(1:nmin), map_out(:,4))
+	write (*,*) "- Computing upper envelope."
+	call ss_interp(nside, nLeg, stiff, nmax, map_in(imax(1:nmax)), imax(1:nmax), map_out(:,3))
+	write (*,*) "- Computing lower envelope."
+	call ss_interp(nside, nLeg, stiff, nmin, map_in(imin(1:nmin)), imin(1:nmin), map_out(:,4))
 	
 end subroutine extrema
 
@@ -248,35 +251,33 @@ subroutine ss_interp(nside, lmax, stiff, next, lut, iext, map_out)
 	do i = 1, next; call pix2vec_nest(nside, iext(i), v(:,i)); end do
 	
 	! Computing "A" and "B"
+	write (*,'(X,"--- Computing kernel matrix of dimension ",I0,".")') next
 	A(:,1) = 1.0; B = lut; forall (i=1:next, j=2:next) A(i,j) = G(v(:,i),v(:,j-1),lmax,stiff) - G(v(:,i),v(:,next),lmax,stiff)
 	
 	! Interpolation coefficients "X=A^(-1)*B"
-	call lsolve(next, A, B)
+	write (*,'(X,A)') "--- Solving system of equations."; call lsolve(next, A, B)
 	
 	! Interpolated value at pixel "p"
-	call cpu_time(start)
+	call cpu_time(start); write (*,'(X,A)') "--- Interpolation started."
 	!$OMP PARALLEL DO
-	do p = 0, n; call ss_interp_val(nside, p, lmax, stiff, next, A, B, v, map_out); end do
+	do p = 0, n; call ss_interp_val(nside, p, lmax, stiff, next, A, B, v, map_out(p)); end do
 	!$OMP END PARALLEL DO
-	call cpu_time(finish)
-	
-	! Show execution time
-	write (*,*) "   Time to compute interpolated values (in seconds):", finish - start
+	call cpu_time(finish); write (*,'(X,A)') "--- Interpolation finished."
 	
 end subroutine ss_interp
 
 ! Interpolated value at pixel "p"
-subroutine ss_interp_val(nside, p, lmax, stiff, next, A, B, v, map_out)
+subroutine ss_interp_val(nside, p, lmax, stiff, next, A, B, v, z)
 	integer, intent(in)   :: nside, p, lmax, stiff, next
 	real(DP), intent(in)  :: A(next,next), B(next), v(3,next)
-	real(DP), intent(out) :: map_out(0:12*nside**2-1)
+	real(DP), intent(out) :: z
 	real(DP)              :: vp(3)
 	integer               :: i
 	
 	call pix2vec_nest(nside, p, vp)
 	
-	map_out(p) = B(1); do i = 1, next-1; map_out(p) = map_out(p) + B(i+1) * G(vp,v(:,i),lmax,stiff); end do
-	map_out(p) = map_out(p) - sum(B(2:next)) * G(vp,v(:,next),lmax,stiff)
+	z = B(1); do i = 1, next-1; z = z + B(i+1) * G(vp,v(:,i),lmax,stiff); end do
+	z = z - sum(B(2:next)) * G(vp,v(:,next),lmax,stiff)
 	
 end subroutine ss_interp_val
 
@@ -335,7 +336,7 @@ pure function expint(n, x)
 	integer              :: i, nm1
 	real(DP)             :: a, b, c, d, del, fact, h
 
-	!if (n < 0 .or. x < 0.0 .or. (x <= 0.0 .and. n <= 1)) call fatal_error('EXPINT: Cannot parse arguments.')
+	!if (n < 0 .or. x < 0.0 .or. (x <= 0.0 .and. n <= 1)) call fatal_error('EXPINT: Cannot parse arguments in EXPINT().')
 
 	if (n == 0) then; expint = exp(-x)/x; return; end if
 
@@ -407,14 +408,13 @@ pure function fleg(x, nl)
 end function fleg
 
 ! Array of given length containing an arithmetic progression
-pure function arth(first, increment, length)
-	integer, intent(in) :: first, increment, length
-	integer             :: arth(length)
-	integer             :: k
+pure function arth(first, increment, n)
+	integer, intent(in) :: first, increment, n
+	integer             :: k, arth(n)
 
 	if (n > 0) arth(1) = first
 	
-	do k = 2, length; arth(k) = arth(k-1) + increment; end do
+	do k = 2, n; arth(k) = arth(k-1) + increment; end do
 
 end function arth
 
@@ -432,18 +432,18 @@ subroutine lsolve(n, A, B)
 	call dgesv(n, 1, A, n, pivot, B, n, stat)
 	
 	! Stop the program if necessary
-	if(stat /= 0) call fatal_error('Singular matrix in lsolve()')
+	if(stat /= 0) call fatal_error('Singular matrix in LSOLVE()')
 	
 end subroutine lsolve
 
 subroutine usage()
-	write (*,'(/,A)') "Usage:"
+	write (*,'(/,X,A,/)') "Usage:"
 	write (*,*) "For Hilbert-Huang transform: hht IFN IMF NIT STF"
-	write (*,*) "For finding local extrema: hht -lext IFN STF"
+	write (*,'(X,A,/)') "For finding local extrema: hht -lext IFN STF"
 	write (*,*) "IFN = Input file name"
 	write (*,*) "IMF = Number of Intrinsic Mode Functions"
 	write (*,*) "NIT = Number of iterations in the Empirical Mode Decomposition"
-	write (*,*) "STF = Stiffness"
+	write (*,'(X,A,/)') "STF = Stiffness"
 	
 end subroutine usage
 
