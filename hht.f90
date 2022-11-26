@@ -6,49 +6,77 @@ use healpix_modules
 
 implicit none
 
-!===============================================================
+!======================================================================================
 real(DP), allocatable          :: map_in(:,:), map_out(:,:,:)
-integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stiff, tens, nLeg, fwhm
+integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stff, tens, fwhm, lmax
 character(len=80)              :: fin, arg, header(43)
 character(len=80), allocatable :: fout(:)
-integer, parameter             :: nlemin = 100 ! Number of minimum local extrema for local interpolation
-integer, parameter             :: gridres = 64 ! Coarse grid resolution for local interpolation
-!===============================================================
+!======================================================================================
+! Parameters for the calculations of spherical harmonics
+integer, parameter  :: LOG2LG = 100, RSMAX = 20, RSMIN = -20
+real(DP), parameter :: FL_LARGE = 2.0**LOG2LG, FL_SMALL = 2.0**(-LOG2LG), ALN2_INV = 1.4426950408889634073599246810 ! 1/log(2)
+!======================================================================================
 
-! Show help information
 select case (nArguments())
 	case (1)
-		call getArgument(1, arg); if (arg == "-h") then; call usage(); stop; end if
+		! Display usage information
+		call getArgument(1, arg)
+		if (arg == "-h") then
+			call usage()
+			stop
+		end if
 		call fatal_error("Cannot parse argument.")
 	case (5)
-		call getArgument(1, arg); if (arg /= "-lext") call fatal_error("Cannot parse argument.")
+		! Generate maps of local extrema and their corresponding interpolations
+		call getArgument(1, arg)
+		if (arg /= "-lext") call fatal_error("Cannot parse argument.")
 		call getArgument(2, fin)
-		call getArgument(3, arg); read(arg,*) stiff ! Stiffness
-        call getArgument(4, arg); read(arg,*) tens  ! Tension parameter
-        call getArgument(5, arg); read(arg,*) fwhm  ! FWHM for Gaussian smoothing
+		call getArgument(3, arg) ! Stiffness
+		read(arg,*) stff
+        call getArgument(4, arg) ! Tension parameter
+		read(arg,*) tens
+        call getArgument(5, arg) ! FWHM for Gaussian smoothing
+		read(arg,*) fwhm
 		
 		! Output file names
-		ch = 4; allocate(fout(ch))
-		do i = 1, ch; write (fout(i),'("extrema",I0,".fits")') i; end do
+		ch = 4
+		allocate(fout(ch))
+		write (fout(1),*) "loc_max.fits"
+		write (fout(2),*) "loc_min.fits"
+		write (fout(3),*) "int_max.fits"
+		write (fout(4),*) "int_min.fits"
 	case (6)
-		! Input parameters
-		call getArgument(1, fin)                    ! Input file name
-		call getArgument(2, arg); read(arg,*) imf   ! Number of IMFs
-		call getArgument(3, arg); read(arg,*) nit   ! Number of iterations in the EMD
-		call getArgument(4, arg); read(arg,*) stiff ! Stiffness
-        call getArgument(5, arg); read(arg,*) tens  ! Tension parameter
-        call getArgument(6, arg); read(arg,*) fwhm  ! FWHM for Gaussian smoothing
+		! Hilbert-Huang transform
+		call getArgument(1, fin) ! Input file name
+		call getArgument(2, arg) ! Number of IMFs
+		read(arg,*) imf
+		call getArgument(3, arg) ! Number of iterations in the EMD
+		read(arg,*) nit
+		call getArgument(4, arg) ! Stiffness
+		read(arg,*) stff
+        call getArgument(5, arg) ! Tension parameter
+		read(arg,*) tens
+        call getArgument(6, arg) ! FWHM for Gaussian smoothing
+		read(arg,*) fwhm
 		
 		! Output file names
-		ch = 2*imf; allocate(fout(ch))
-		do i = 1, imf; write (fout(i),'("imf",I0,".fits")') i; end do
-		do i = imf+1, ch; write (fout(i),'("res",I0,".fits")') i - imf; end do
+		ch = 2*imf
+		allocate(fout(ch))
+		
+		do i = 1, imf
+			write (fout(i),'("imf",I0,".fits")') i
+		end do
+		do i = imf+1, ch
+			write (fout(i),'("res",I0,".fits")') i - imf
+		end do
 	case default
 		call fatal_error("Invalid number of arguments.")
 end select
 
 ! Parameters of the FITS file containing the input map
-npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord); n = nside2npix(nside) - 1; nLeg = 2 * nside
+npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord)
+n = nside2npix(nside) - 1
+lmax = 3*nside-1
 
 write (*,'(/,X, "Input map Nside = ", I0)') nside
 
@@ -60,30 +88,34 @@ call input_map(fin, map_in, npix, nmaps)
 write (*,'(/,X,A)') "Map read successfully."
 
 ! Gaussian smoothing the input map
-if (fwhm /= 0) call smoothing(nside, ord, map_in(:,1), fwhm)
+if (fwhm /= 0) call smoothing(nside, ord, lmax, map_in(:,1), fwhm)
 
 ! All the following subroutines are designed for maps in NESTED ordering
 if (ord == 1) call convert_ring2nest(nside, map_in)
 
 ! Find extrema or perform empirical mode decomposition
-write (*,'(/,X,"Using ",I0," Legendre polynomials for the interpolation with stiffness parameter ",I0," and tension parameter ",I0,".")') nLeg, stiff, tens
+write (*,'(/,X,"Interpolation with stiffness parameter ",I0," and tension parameter ",I0,".")') stff, tens
 if (nArguments() == 5) then
-	call extrema(nside, map_in(:,1), stiff, tens, map_out(:,1,:))
-	write (*,*) "Extrema and envelopes obtained successfully."
+	call extrema(nside, map_in(:,1), stff, tens, lmax, fwhm, map_out(:,1,:))
+	write (*,'(/, X, A)') "Extrema and envelopes obtained successfully."
 else
-	call emd(nside, map_in(:,1), imf, nit, stiff, tens, map_out(:,1,:))
+	call emd(nside, map_in(:,1), imf, nit, stff, tens, lmax, fwhm, map_out(:,1,:))
 	write (*,*) "Empirical Mode Decomposition completed successfully."
 end if
 
 ! Go back to RING ordering if necessary
 if (ord == 1) then
 	call convert_nest2ring(nside, map_in)
-	do i = 1, ch; call convert_nest2ring(nside, map_out(:,:,i)); end do
+	do i = 1, ch
+		call convert_nest2ring(nside, map_out(:,:,i))
+	end do
 end if
 
 ! Generating output files
 call write_minimal_header(header, 'map', nside=nside, order=ord)
-do i = 1, ch; call output_map(map_out(:,:,i), header, fout(i)); end do
+do i = 1, ch
+	call output_map(map_out(:,:,i), header, fout(i))
+end do
 
 ! Generating file containing the EMD and the residual
 if (nArguments() == 6) then
@@ -97,13 +129,11 @@ deallocate(map_in, map_out, fout)
 contains
 
 ! Gaussian smoothing process
-subroutine smoothing(nside, ord, map_in, fwhm)
+subroutine smoothing(nside, ord, lmax, map_in, fwhm)
 	integer, intent(in)       :: nside, ord, fwhm
 	real(DP), intent(inout)   :: map_in(0:12*nside**2-1)
 	complex(DPC), allocatable :: alm(:,:,:)
 	integer                   :: lmax
-	
-	lmax = 3*nside - 1
 	
 	write (*,'(/,X,"Smoothing input map with Gaussian beam.")')
 	
@@ -116,14 +146,295 @@ subroutine smoothing(nside, ord, map_in, fwhm)
 	call alter_alm(nside, lmax, lmax, dble(fwhm), alm)
 	call alm2map(nside, lmax, lmax, alm, map_in)
 	
+	deallocate(alm)
+	
 	! Go back to NESTED ordering if necessary
 	if (ord == 2) call convert_ring2nest(nside, map_in)
 	
-end subroutine
+end subroutine smoothing
+
+! Positions and values of the local extrema of an input map
+subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
+	integer, intent(in)   :: nside
+	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
+	integer, intent(out)  :: nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
+	integer               :: n, i, j, l, nlist
+	integer, allocatable  :: list(:)
+	real(DP)              :: rpix, radius, vi(3)
+	logical               :: use_disc
+	
+	n = nside2npix(nside) - 1
+	
+	nmin = 0 ! Local minima counter
+	nmax = 0 ! Local maxima counter
+	
+	! Use "query_disc" subroutine to find local extrema, otherwise use "neighbours_nest"
+	use_disc = .false.
+	
+	if (use_disc) then
+		!======================================================================================
+		! Finding local extrema using disk with given radius
+		!======================================================================================
+		rpix = sqrt(4.0*pi/(n+1)) / sqrt(2.0) ! Approximate radius of one pixel
+		radius = 5.0*rpix                       ! Disk radius
+		l = (2.0*radius)**2 / (4.0*pi/(n+1))    ! Approximate number of pixels inside the disk
+		
+		allocate(list(0:l))
+		
+		do i = 0, n
+			! Pixel indices of a neighborhood around pixel "i"
+			call pix2vec_nest(nside, i, vi)
+			call query_disc(nside, vi, radius, list, nlist, nest=1)
+			
+			! Find local extrema
+			if (map_in(i) >= maxval(map_in(list(1:nlist)))) then
+				nmax = nmax + 1
+				imax(nmax) = i
+			end if
+			if (map_in(i) <= minval(map_in(list(1:nlist)))) then
+				nmin = nmin + 1
+				imin(nmin) = i
+			end if
+		end do
+		!======================================================================================
+	else
+		!======================================================================================
+		! Finding local extrema using nearest neighbours
+		!======================================================================================
+		allocate(list(8))
+		
+		do i = 0, n
+			! Pixel indices of a neighborhood around pixel "i"
+			call neighbours_nest(nside, i, list, nlist)
+			
+			! Find local extrema
+			if (map_in(i) >= maxval(map_in(list(1:nlist)))) then
+				nmax = nmax + 1
+				imax(nmax) = i
+			end if
+			if (map_in(i) <= minval(map_in(list(1:nlist)))) then
+				nmin = nmin + 1
+				imin(nmin) = i
+			end if
+		end do
+		!======================================================================================
+	end if
+	
+	deallocate(list)
+	
+end subroutine local_extrema
+
+! Solve the real system of "n" symmetric linear equations in "n" unknowns in the form "A*X=B"
+subroutine lsolve(n, A, B)
+	integer, intent(in)     :: n
+	real(DP), intent(in)    :: A(n,n)
+	real(DP), intent(inout) :: B(n)
+	real(DP), allocatable   :: work(:)
+	real(DP)                :: get_lwork(1)
+	integer                 :: pivot(n), stat, lwork
+	
+	stat = 0 ! Status indicator ("stat/=0" indicates an error)
+	
+	! Returns the optimal size of the WORK array as the first entry of the GET_LWORK array
+	call dsysv('U', n, 1, A, n, pivot, B, n, get_lwork, -1, stat)
+	
+	lwork = get_lwork(1) ! Parameter to calculate the optimal size of the WORK array
+	
+	allocate(work(lwork))
+	
+	! LAPACK subroutine to get "X=A^(-1)*B" for a symmetric matrix "A"
+	call dsysv('U', n, 1, A, n, pivot, B, n, work, lwork, stat)
+	
+	! Stop the program if necessary
+	if (stat /= 0) call fatal_error('Singular matrix in subroutine LSOLVE()')
+	
+	deallocate(work)
+	
+end subroutine lsolve
+
+! First factor for interpolation in harmonic space
+subroutine interp_alms(c, ang, lmax, mmax, alm)
+	integer, intent(in)       :: lmax, mmax
+	real(DP), intent(in)      :: c(:), ang(size(c),2)
+	complex(DPC), intent(out) :: alm(1,0:lmax,0:mmax)
+	real(DP)                  :: mfac(0:mmax), recfac(0:1,0:lmax), lam_lm(0:lmax)
+	integer                   :: l, m
+	
+	alm = (0.0, 0.0)
+	
+	! Recursion factors used in "lambda_mm" calculation for all "m" in "0<=m<=m_max"
+	call gen_mfac(mmax, mfac)
+	
+	!$OMP PARALLEL PRIVATE(m, i, recfac, lam_lm, l) SHARED(mmax, lmax, c, ang, mfac, alm)
+	!$OMP DO SCHEDULE(DYNAMIC)
+	do m = 0, mmax
+		! Generate recursion factors useful for "lambda_lm" for a given "m"
+		call gen_recfac(lmax, m, recfac)
+		
+		do i = 1, size(c)
+			! Compute "lam_lm(theta_i)" for all "l>=m" for a given "m"
+			call do_lambda_lm(lmax, m, abs(cos(ang(i,1))), sin(ang(i,1)), mfac(m), recfac, lam_lm)
+			if (cos(ang(i,1)) < 0.0) forall (l=m:lmax) lam_lm(l) = (-1.0)**(l+m) * lam_lm(l)
+			
+			! Compute numerators for all "l>=m" for a given "m"
+			alm(1,m:lmax,m) = alm(1,m:lmax,m) + cmplx(c(i) * lam_lm(m:lmax), kind=DPC) * cdexp((0.0, -1.0) * m * ang(i,2))
+		end do
+	end do
+	!$OMP END DO
+	!$OMP END PARALLEL
+	
+end subroutine interp_alms
+
+! Global interpolation by spherical spline (Perrin et al, 1988)
+subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
+	integer, intent(in)       :: nside, lmax, stff, tens, next, iext(next)
+	real(DP), intent(in)      :: LUT(next)
+	real(DP), intent(out)     :: map_out(0:12*nside**2-1)
+	real(DP)                  :: vec(next,3), ang(next,2), vi(3), fwhm
+	integer                   :: i, j, n, l, lmin, omega_pix
+	real(DP), allocatable     :: A(:,:), B(:), bl1(:,:), bl2(:,:), wl(:,:)
+	complex(DPC), allocatable :: alm(:,:,:)
+	logical                   :: harmonic_space
+	
+	n = nside2npix(nside) - 1
+	fwhm = acos(1.0 - 2.0/next) * 180.0 * 60.0 / pi
+	
+	allocate(A(next,next), B(next), source=0.0)                      ! System of linear equations
+	allocate(bl1(0:lmax,1), bl2(0:lmax,1), wl(0:lmax,1), source=1.0) ! Beams
+	
+	! Positions of the local extrema
+	do i = 1, next
+		call pix2vec_nest(nside, iext(i), vec(i,:))
+		call pix2ang_nest(nside, iext(i), ang(i,1), ang(i,2))
+	end do
+	
+	! Inverse of differential operator in harmonic space
+	if (stff /= 0 .or. tens == 0) then
+		lmin = 1
+		bl1(0,1) = 1.0
+	else
+		lmin = 0
+		bl1(0,1) = -1.0 / tens
+	end if
+	
+	forall (l=1:lmax) bl1(l,1) = (-1.0)**(stff+1) / ((l*(l+1) + tens) * (l*(l+1))**stff)
+	
+	! Pixel window function
+	call pixel_window(wl, nside)
+	
+	! Gaussian beam
+	call gaussbeam(dble(fwhm), lmax, bl2)
+	
+	write (*,'(/, X, "--- Computing interpolation matrix of dimension ", I0, ".")') next
+	
+	! Computing "A"
+	!$OMP PARALLEL PRIVATE(i, j) SHARED(A, vec, lmin, lmax)
+	!$OMP DO SCHEDULE(DYNAMIC)
+	do j = 1, next
+		do i = 1, j
+			A(i,j) = Aij(vec(i,:), vec(j,:), wl*bl1*bl2, lmin, lmax)
+			!A(i,j) = G(vec(i,:), vec(j,:), wl*bl1, lmin, lmax)
+			if (i /= j) A(j,i) = A(i,j)
+		end do
+	end do
+	!$OMP END DO
+	!$OMP END PARALLEL
+	
+	! Computing "B"
+	B = LUT - lmin * sum(LUT)/next
+
+	write (*,'(X, A)') "--- Solving system of equations."
+
+	! Calculating and storing the interpolation coefficients "X=A^(-1)*B" in array "B"
+	call lsolve(next, A, B)
+	
+	deallocate(A)
+	
+	harmonic_space = .true.
+	
+	if (harmonic_space) then
+		!======================================================================================
+		! Interpolation in spherical harmonic space
+		!======================================================================================
+		write (*,'(X, A)') "--- Calculating spherical harmonic coefficients."
+		
+		allocate(alm(1,0:lmax,0:lmax), source=(0.0, 0.0))
+		
+		! Calculating the sum of "C_i*Y^(*)_lm(theta_i,phi_i)" over all pixels "i" with values in LUT
+		call interp_alms(B, ang, lmax, lmax, alm)
+		
+		! Convolution in harmonic space and generation of output map
+		forall (l=lmin:lmax) alm(1,l,0:l) = alm(1,l,0:l) * wl(l,1) * bl1(l,1) * bl2(l,1)
+		
+		! "a_00" takes a different value when stff>0 or tens=0
+		if (lmin == 1) alm(1,0,0) = sqrt(4.0*pi) * sum(LUT) / next
+		
+		write (*,'(X, A)') "--- Generating map."
+		
+		call alm2map(nside, lmax, lmax, alm, map_out) ! Generates map in RING ordering
+		call convert_ring2nest(nside, map_out)        ! Goes back to NESTED ordering
+
+		write (*,'(X, "--- Max. and min. interpolation error: ", E10.4, X, E10.4)') maxval(abs(LUT-map_out(iext))), minval(abs(LUT-map_out(iext)))
+		
+		deallocate(B, wl, bl1, bl2, alm)
+		!======================================================================================
+	else
+		!======================================================================================
+		! Interpolation in real space
+		!======================================================================================
+		write (*,'(X, A)') "--- Interpolation in real space started."
+		
+		map_out = lmin * sum(LUT)/next
+		
+		!$OMP PARALLEL PRIVATE (i, vi) SHARED(n, nside, map_out, lmin, lmax)
+		!$OMP DO SCHEDULE(DYNAMIC)
+		do i = 0, n
+			! Position of the pixel on the map
+			call pix2vec_nest(nside, i, vi)
+			
+			! Calculation of the interpolated value
+			do j = 1, next
+				map_out(i) = map_out(i) + B(j) * Aij(vi, vec(j,:), wl*bl1, lmin, lmax)
+				!map_out(i) = map_out(i) + B(j) * G(vi, vec(j,:), wl*bl1, lmin, lmax)
+			end do
+		end do
+		!$OMP END DO
+		!$OMP END PARALLEL
+		
+		deallocate(B, wl, bl1, bl2)
+		
+		write (*,'(X, "--- Max. and min. interpolation error: ", E10.4, X, E10.4)') maxval(abs(LUT-map_out(iext))), minval(abs(LUT-map_out(iext)))
+		!======================================================================================
+	end if
+	
+end subroutine ss_interp
+
+! Computes the upper and lower envelopes of an input map
+subroutine extrema(nside, map_in, stff, tens, lmax, fwhm, map_out)
+	integer, intent(in)   :: nside, stff, tens, lmax, fwhm
+	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
+	real(DP), intent(out) :: map_out(0:12*nside**2-1,4)
+	integer               :: nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
+	
+	! Finding the positions and values of the local extrema of the input map
+	write (*,'(/, X, A)') "- Finding local extrema."
+	call local_extrema(nside, map_in, nmax, nmin, imax, imin)
+	
+	map_out(:,1:2) = HPX_DBADVAL
+	
+	map_out(imax(1:nmax),1) = map_in(imax(1:nmax))
+	map_out(imin(1:nmin),2) = map_in(imin(1:nmin))
+	
+	write (*,'(/, X, A)') "- Computing upper envelope."
+	call ss_interp(nside, lmax, stff, tens, nmax, map_in(imax(1:nmax)), imax(1:nmax), map_out(:,3))
+	write (*,'(/, X, A)') "- Computing lower envelope."
+	call ss_interp(nside, lmax, stff, tens, nmin, map_in(imin(1:nmin)), imin(1:nmin), map_out(:,4))
+	
+end subroutine extrema
 
 ! Empirical Mode Decomposition process
-subroutine emd(nside, map_in, imf, nit, stiff, tens, map_out)
-	integer, intent(in)   :: nside, imf, nit, stiff, tens
+subroutine emd(nside, map_in, imf, nit, stff, tens, lmax, fwhm, map_out)
+	integer, intent(in)   :: nside, imf, nit, stff, tens, lmax, fwhm
 	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
 	real(DP), intent(out) :: map_out(0:12*nside**2-1,2*imf)
 	integer               :: p, i, j, n, nlist, nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
@@ -152,360 +463,170 @@ subroutine emd(nside, map_in, imf, nit, stiff, tens, map_out)
 			! Finding the positions and values of the local extrema of the input map
 			call local_extrema(nside, inp, nmax, nmin, imax, imin)
 
-			! Compute the smooth envelopes (3 ways)
-            
-			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+			! Computing smooth upper and lower envelopes
+			call ss_interp(nside, lmax, stff, tens, nmax, inp(imax(1:nmax)), imax(1:nmax), Emax)
+			call ss_interp(nside, lmax, stff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
 			
-			! Interpolation by spherical spline with stiffness
-			call ss_interp(nside, nLeg, stiff, tens, nmax, inp(imax(1:nmax)), imax(1:nmax), Emax)
-			call ss_interp(nside, nLeg, stiff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
-			
-			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			
-			! Local interpolation by spherical spline with stiffness
-			!!$OMP PARALLEL DO
-			!do p = 0, n; call loc_interp(nside, p, nLeg, stiff, tens, inp(imax(1:nmax)), nmax, imax(1:nmax), Emax(p)); end do
-			!!$OMP END PARALLEL DO
-			!!$OMP PARALLEL DO
-			!do p = 0, n; call loc_interp(nside, p, nLeg, stiff, tens, inp(imin(1:nmin)), nmin, imin(1:nmin), Emin(p)); end do
-			!!$OMP END PARALLEL DO
-			
-			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			
-			! Faster local interpolation by spherical spline with stiffness
-			!call loc_interp_mg(nside, gridres, nLeg, stiff, tens, inp(imax(1:nmax)), nmax, imax(1:nmax), Emax)
-			!call loc_interp_mg(nside, gridres, nLeg, stiff, tens, inp(imin(1:nmin)), nmin, imin(1:nmin), Emin)
-			
-			!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			
-			write (*,'(X, X, X, "Iteration finished with stop criteria = ", E10.4)') maxval(abs((Emax + Emin) / 2.0))
+			write (*,'(/, 3X, "Stop criteria = ", E10.4)') sum(abs((Emax + Emin) / 2.0)**2 / inp**2)
 			
 			! Update IMF
 			map_out(:,i) = inp - (Emax + Emin) / 2.0
 			
 			deallocate(inp, Emax, Emin)
-		
 		end do
 		
 		! Update residue
 		map_out(:,imf+i) = map_out(:,imf+i) - map_out(:,i)
-		
 	end do
 	
 end subroutine emd
 
-! Empirical Mode Decomposition process
-subroutine extrema(nside, map_in, stiff, tens, map_out)
-	integer, intent(in)   :: nside, stiff, tens
-	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
-	real(DP), intent(out) :: map_out(0:12*nside**2-1,4)
-	integer               :: nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
+! Calculation of the elements of the interpolation matrix (unstable)
+function G(vi, vj, bl, lmin, lmax)
+	integer, intent(in)  :: lmin, lmax
+	real(DP), intent(in) :: vi(3), vj(3), bl(0:lmax,1)
+	real(DP)             :: theta_ij, P(0:2), G
+	integer              :: l
 	
-	! Finding the positions and values of the local extrema of the input map
-	call local_extrema(nside, map_in, nmax, nmin, imax, imin)
+	! Angular distance between input positions
+	call angdist(vi, vj, theta_ij)
 	
-	! Minima and maxima
-	write (*,'(/,X,A)') "- Finding local maxima."
-	map_out(:,1) = HPX_DBADVAL; forall (i=1:nmax) map_out(imax(i),1) = map_in(imax(i))
-	write (*,*) "- Finding local minima."
-	map_out(:,2) = HPX_DBADVAL; forall (i=1:nmin) map_out(imin(i),2) = map_in(imin(i))
+	G = 0.0
 	
-	! Compute the smooth envelopes (interpolation by spherical spline with stiffness)
-	write (*,*) "- Computing upper envelope."
-	call ss_interp(nside, nLeg, stiff, tens, nmax, map_in(imax(1:nmax)), imax(1:nmax), map_out(:,3))
-	write (*,*) "- Computing lower envelope."
-	call ss_interp(nside, nLeg, stiff, tens, nmin, map_in(imin(1:nmin)), imin(1:nmin), map_out(:,4))
-	
-end subroutine extrema
-
-! Positions and values of the local extrema of an input map
-subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
-	integer, intent(in)  :: nside
-	real(DP), intent(in) :: map_in(0:12*nside**2-1)
-	integer, intent(out) :: nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
-	integer              :: n, p, q, nlist, list(8)
-	real(DP)             :: neigh(8)
-	
-	n = nside2npix(nside) - 1
-	
-	! Local extrema counter
-	nmin = 0; nmax = 0
-	
-	do p = 0, n
-		! Pixel indices of a neighborhood around "p"
-		call neighbours_nest(nside, p, list, nlist)
+	if (theta_ij > epsilon(theta_ij)) then
+		P(0) = 1.0
+		P(1) = cos(theta_ij)
 		
-		! Pixel values of the neighborhood around "p"
-		forall (q = 1:nlist) neigh(q) = map_in(list(q))
+		! Initial terms of summation
+		if (lmin == 0) G = G + P(0) * bl(0,1) / (4*pi)
+		if (lmin <= 1) G = G + P(1) * bl(1,1) * 3 / (4*pi)
 		
-		! Find local extrema
-		if (map_in(p) >= maxval(neigh(1:nlist))) then; nmax = nmax + 1; imax(nmax) = p; end if
-		if (map_in(p) <= minval(neigh(1:nlist))) then; nmin = nmin + 1; imin(nmin) = p; end if
-	end do
-	
-end subroutine local_extrema
-
-! Local interpolation by spherical spline (Perrin et al, 1988)
-subroutine loc_interp(nside, pix, lmax, stiff, tens, lut, next, iext, z)
-	integer, intent(in)   :: nside, pix, lmax, stiff, tens, next, iext(next)
-	real(DP), intent(in)  :: lut(next)
-	real(DP), intent(out) :: z
-	real(DP)              :: vpix(3), rpix, radius, const
-	real(DP), allocatable :: A(:,:), B(:), v(:,:)
-	integer               :: nle, i, j, l, nlist
-	integer, allocatable  :: list(:), lutext(:), le(:)
-	
-	! Initial number of local extrema, radius of one single pixel and initial radius
-	nle = 0; rpix = sqrt(4.0*pi/nside2npix(nside)) * sqrt(2.0)/2; radius = rpix
-	
-	! Cartesian vector coordinates of pixel "pix" on the coarse map
-	call pix2vec_nest(nside, pix, vpix)
-	
-	! Find the adequate number of local extrema around pixel "pix"
-	do while (nle == 0)
-		! List size
-		l = nside2npix(nside) * sin(radius/2.0)**2
+		! Summation
+		do l = 2, lmax
+			P(mod(l,3)) = ((2*l-1) * cos(theta_ij) * P(mod(l-1,3)) - (l-1) * P(mod(l-2,3))) / l
+			if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * (2*l+1) / (4*pi)
+		end do
+	else
+		! Initial terms of summation
+		if (lmin == 0) G = G + bl(0,1) / (4*pi)
+		if (lmin <= 1) G = G + bl(1,1) * 3 / (4*pi)
 		
-		! Pixel indices of a neighborhood around pixel "pix"
-		allocate(list(0:3*l/2), le(1:3*l/4)); call query_disc(nside, vpix, radius, list, nlist, nest=1)
-		
-		! If "list(i)" is a local extremum, then store it into the array "le"
-		do i = 0, nlist-1; if (any(iext == list(i))) then; nle = nle + 1; le(nle) = list(i); end if; end do
-		
-		! Increase radius and reset parameters if there are too few local extrema
-		if (nle < nlemin) then; radius = radius + rpix; nle = 0; deallocate(list, le); end if
-		
-	end do
-	
-	!write (*,'(X,"--- Computing kernel matrix of dimension ",I0,".")') nle
-	
-	! Indices of "lut" corresponding to the local extrema
-	allocate(lutext(nle)); forall (i = 1:nle) lutext(i) = findloc(iext, value=le(i), dim=1)
-	
-	! Computing the interpolation coefficients stored in "X" by solving "A*X=B"
-	allocate(A(nle,nle), B(nle), v(3,nle))
-	
-	! Constant parameter in interpolation function
-	if (tens == 0) const = sum(lut(lutext)) / nle; if (tens /= 0) const = 0.0
-	
-	! Vector coordinates of the extrema in "le"
-	do i = 1, nle; call pix2vec_nest(nside, iext(lutext(i)), v(:,i)); end do
-	
-	! Computing "A" and "B"
-	forall (i=1:nle, j=1:nle) A(i,j) = G(dot_product(v(:,i),v(:,j)),lmax,stiff,tens); B = lut(lutext) - const
-	
-	! Interpolation coefficients "X=A^(-1)*B"
-	call lsolve(nle, A, B)
-	
-	! Interpolated value at pixel "pix"
-	z = const; do j = 1, nle; z = z + B(j) * G(dot_product(vpix,v(:,j)),lmax,stiff,tens); end do
-	
-	deallocate(list, le, lutext, A, B, v)
-	
-end subroutine loc_interp
-
-! Multigrid local interpolation by spherical spline (Perrin et al, 1988)
-subroutine loc_interp_mg(nside, nsidec, lmax, stiff, tens, lut, next, iext, map_out)
-	integer, intent(in)   :: nside, nsidec, lmax, stiff, tens, next, iext(next)
-	real(DP), intent(in)  :: lut(next)
-	real(DP), intent(out) :: map_out(0:12*nside**2-1)
-	real(DP)              :: ang(2), outvals((nside/nsidec)**2)
-	integer               :: n, nc, pc, nle, i
-	integer, allocatable  :: list(:), lutext(:), le(:), coarse(:,:), count(:)
-	
-	n = nside2npix(nside) - 1; nc = nside2npix(nsidec) - 1
-	
-	write (*,'(/,X, "Parameters for multigrid local interpolation:")')
-	write (*,'(X, "Coarser Nside = ", I0)') gridres
-	write (*,'(X, "Fine pixels per coarse pixel = ", I0)') (nside/gridres)**2
-	
-	! Coarse map
-	allocate(coarse(0:nc,(nside/nsidec)**2), count(0:nc)); count = 0
-	
-	! Map pixels indices from original Nside to pixels in lower Nside
-	do i = 0, n
-		! Position of pixel "i" on the original map and corresponding pixel "pc" on the coarse map
-		call pix2ang_nest(nside, i, ang(1), ang(2)); call ang2pix_nest(nsidec, ang(1), ang(2), pc)
-		
-		! Count and store pixels on the original map within pixel "pc" on the coarse map
-		count(pc) = count(pc) + 1; coarse(pc,count(pc)) = i
-	end do
-	
-	!write (*,'(X,X,X,X, "COUNT min = ", I0, " max = ", I0)') maxval(count), minval(count)
-	
-	! Calculate interpolated values for pixels of the original map within pixel "i" in the coarse map
-	!$OMP PARALLEL DO PRIVATE(outvals)
-	do i = 0, nc; call loc_interp_mg_val(nside, nsidec, coarse(i,:), lmax, stiff, tens, lut, next, iext, outvals, i); map_out(coarse(i,:)) = outvals; end do
-	!$OMP END PARALLEL DO
-	
-	deallocate(coarse, count)
-	
-end subroutine loc_interp_mg
-
-! Pixel value for multigrid local interpolation by spherical spline
-subroutine loc_interp_mg_val(nside, nsidec, ind, lmax, stiff, tens, lut, next, iext, outvals, pix)
-	integer, intent(in)   :: nside, nsidec, ind((nside/nsidec)**2), lmax, stiff, tens, next, iext(next), pix
-	real(DP), intent(in)  :: lut(next)
-	real(DP), intent(out) :: outvals((nside/nsidec)**2)
-	real(DP)              :: ang(2), vpix(3), rpix, radius, const
-	real(DP), allocatable :: A(:,:), B(:), v(:,:)
-	integer               :: nle, i, j, k, l, nlist
-	integer, allocatable  :: list(:), lutext(:), le(:)
-	
-	! Initial number of local extrema, radius of one single pixel and initial radius
-	nle = 0; rpix = sqrt(4.0*pi / nside2npix(nsidec)) * sqrt(2.0)/2; radius = rpix
-	
-	! Cartesian vector coordinates of pixel "pix" on the coarse map
-	call pix2vec_nest(nsidec, pix, vpix)
-	
-	! Find the adequate number of local extrema around pixel "pix" in the coarse map
-	do while (nle == 0)
-		! List size
-		l = nside2npix(nside) * sin(radius/2.0)**2
-		
-		! Pixel indices of a neighborhood around pixel "pix"
-		allocate(list(0:3*l/2), le(1:3*l/4)); call query_disc(nside, vpix, radius, list, nlist, nest=1)
-		
-		! If "list(i)" is a local extremum, then store it into the array "le"
-		do i = 0, nlist-1; if (any(iext == list(i))) then; nle = nle + 1; le(nle) = list(i); end if; end do
-		
-		! Increase radius and reset parameters if there are too few local extrema
-		if (nle < nlemin) then; radius = radius * 2; nle = 0; deallocate(list, le); end if
-		
-	end do
-	
-	write (*,'(X,"--- Computing kernel matrix of dimension ",I0,".")') nle
-	
-	allocate(lutext(nle), A(nle,nle), B(nle), v(3,nle))
-	
-	! Indices of "lut" corresponding to the local extrema
-	forall (i = 1:nle) lutext(i) = findloc(iext, value=le(i), dim=1)
-	
-	! Constant parameter in interpolation function
-    	if (tens == 0) const = sum(lut(lutext)) / nle; if (tens /= 0) const = 0.0
-	
-    	! Vector coordinates of the extrema in "le"
-    	do i = 1, nle; call pix2vec_nest(nside, iext(lutext(i)), v(:,i)); end do
-	
-    	! Computing the interpolation coefficients stored in "X" by solving "A*X=B"
-    	forall (i=1:nle, j=1:nle) A(i,j) = G(dot_product(v(:,i),v(:,j)),lmax,stiff,tens); B = lut(lutext) - const
-	
-    	! Interpolation coefficients "X=A^(-1)*B"
-    	call lsolve(nle, A, B)
-	
-    	! Interpolated value for all pixels on the original map within pixel "pix" on the coarse map
-    	do i = 1, (nside/nsidec)**2
-		! Position of the pixel on the original map
-		call pix2vec_nest(nside, ind(i), vpix)
-        	
-        	! Calculation of the interpolated value
-        	outvals(i) = const; do j = 1, nle; outvals(i) = outvals(i) + B(j) * G(dot_product(vpix,v(:,j)),lmax,stiff,tens); end do
-    	end do
-
-    	deallocate(list, le, lutext, A, B, v)
-    	
-end subroutine loc_interp_mg_val
-
-! Global interpolation by spherical spline (Perrin et al, 1988)
-subroutine ss_interp(nside, lmax, stiff, tens, next, lut, iext, map_out)
-	integer, intent(in)   :: nside, lmax, stiff, tens, next, iext(next)
-	real(DP), intent(in)  :: lut(next)
-	real(DP), intent(out) :: map_out(0:12*nside**2-1)
-	real(DP)              :: A(next,next), B(next), v(3,next), vi(3), const
-	integer               :: i, j, p, n
-	
-	n = nside2npix(nside) - 1
-    
-    	! Constant parameter in interpolation function
-    	if (stiff == 0 .and. tens /= 0) then; const = 0.0; else; const = sum(lut) / next; end if
-	
-	! Vector coordinates of the extrema in "le"
-	do i = 1, next; call pix2vec_nest(nside, iext(i), v(:,i)); end do
-    	
-    	write (*,'(/,X,"--- Computing kernel matrix of dimension ",I0,".")') next
-	
-	! Computing "A" and "B"
-    	!$OMP PARALLEL DO
-    	do j = 1, next; do i = 1, next; A(i,j) = G(dot_product(v(:,i),v(:,j)),lmax,stiff,tens); end do; end do
-    	!$OMP END PARALLEL DO
-    	B = lut - const
-    
-    	write (*,'(X,A)') "--- Solving system of equations."
-    	
-	! Interpolation coefficients "X=A^(-1)*B"
-	call lsolve(next, A, B)
-	
-	write (*,'(X,A)') "--- Interpolation started."
-    	
-	!$OMP PARALLEL DO PRIVATE(vi)
-	do i = 0, n
-        	! Position of the pixel on the map
-        	call pix2vec_nest(nside, i, vi)
-        
-        	! Calculation of the interpolated value
-        	map_out(i) = const; do j = 1, next; map_out(i) = map_out(i) + B(j) * G(dot_product(vi,v(:,j)),lmax,stiff,tens); end do
-    	end do
-	!$OMP END PARALLEL DO
-    
-	write (*,'(X,A,/)') "--- Interpolation finished."
-	
-end subroutine ss_interp
-
-! Basis function for interpolation by spherical spline
-pure function G(x, lmax, stiff, tens)
-	integer, intent(in)   :: lmax, stiff, tens
-	real(DP), intent(in)  :: x
-	real(DP)              :: v3(3), P(0:2), S, theta, G
-	integer               :: i
-	
-    	G = - 1.0 / (4*pi); P(0) = 1.0; P(1) = x
-    	
-    	if (stiff == 0 .and. tens /= 0) then
-        	S = P(0) * dble(2*0+1) / ((0*(0+1))+tens) + P(1) * dble(2*1+1) / ((1*(1+1))+tens)
-        	do i = 2, lmax
-            		P(mod(i,3)) = ((2*i-1) * x * P(mod(i-1,3)) - (i-1) * P(mod(i-2,3))) / i
-            		S = S + P(mod(i,3)) * dble(2*i+1) / ((i*(i+1))+tens)
-        	end do
-        	G = G * S
-    	else
-        	S = P(1) * dble(2*1+1) / (((1*(1+1))+tens) * (1*(1+1))**stiff)
-        	do i = 2, lmax
-            		P(mod(i,3)) = ((2*i-1) * x * P(mod(i-1,3)) - (i-1) * P(mod(i-2,3))) / i
-            		S = S + P(mod(i,3)) * dble(2*i+1) / (((i*(i+1))+tens) * (i*(i+1))**stiff)
-        	end do
-        	G = (-1)**stiff * G * S
-    	end if
+		! Summation
+		do l = 2, lmax
+			if (l >= lmin) G = G + bl(l,1) * (2*l+1) / (4*pi)
+		end do
+	end if
 	
 end function G
 
-! Solve the system of "n" linear equations in "n" unknowns in the form "A*X=B"
-subroutine lsolve(n, A, B)
-	integer, intent(in)     :: n
-	real(DP), intent(in)    :: A(n,n)
-	real(DP), intent(inout) :: B(n)
-	integer                 :: pivot(n), stat
+! Calculation of the elements of the interpolation matrix (stable)
+function Aij(vi, vj, bl, lmin, lmax)
+	integer, intent(in)  :: lmin, lmax
+	real(DP), intent(in) :: vi(3), vj(3), bl(0:lmax,1)
+	real(DP)             :: theta_ij, mfac(0:0), recfac(0:1,0:lmax), lam_lm(0:lmax), Aij
+	integer              :: l
 	
-	! Status indicator ("stat /= 0" indicates an error)
-	stat = 0
+	Aij = 0.0
 	
-	! LAPACK subroutine to compute the solution to a real system of linear equations
-	call dgesv(n, 1, A, n, pivot, B, n, stat)
+	! Angular distance between input positions
+	call angdist(vi, vj, theta_ij)
 	
-	! Stop the program if necessary
-	if (stat /= 0) call fatal_error('Singular matrix in LSOLVE()')
+	! Recursion factor used in "lambda_00" calculation
+	call gen_mfac(0, mfac)
 	
-end subroutine lsolve
+	! Generate recursion factors useful for "lambda_l0"
+	call gen_recfac(lmax, 0, recfac)
+	
+	if (theta_ij > epsilon(theta_ij)) then
+		! Compute "lambda_l0(theta_ij)=sqrt((2*l+1)/4*pi)*Pl(cos(theta_ij))" for all "l" for "m=0"
+		call do_lambda_lm(lmax, 0, abs(cos(theta_ij)), sin(theta_ij), mfac(0), recfac, lam_lm)
+		if (cos(theta_ij) < 0.0) forall (l=0:lmax) lam_lm(l) = (-1.0)**l * lam_lm(l)
+	else
+		forall (l=0:lmax) lam_lm(l) = sqrt((2.0*l+1.0) / (4.0*pi))
+	end if
+	
+	! Compute summation
+	do l = lmin, lmax
+		Aij = Aij + bl(l,1) * sqrt((2.0*l+1.0) / (4.0*pi)) * lam_lm(l)
+	end do
+	
+end function Aij
 
+! Computes scalar "lambda_lm(theta)" for all "l" in "[m,lmax]" for a given "m", and given theta
+subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
+	integer, intent(in)   :: lmax,  m
+	real(DP), intent(in)  :: cth, sth, mfac, recfac(0:1,0:lmax)
+	real(DP), intent(out) :: lam_lm(0:lmax)
+	real(DP)              :: log2val, dlog2lg, ovflow, unflow, corfac, lam_mm, lam_0, lam_1, lam_2, logOVFLOW, rescale_tab(RSMIN:RSMAX)
+	integer               :: scalel, l, l_min, s, smax
+	
+	! Initialize RESCALE_TAB array
+	logOVFLOW = log(FL_LARGE)
+	smax = INT( log(MAX_DP) / logOVFLOW )
+	rescale_tab(RSMIN:RSMAX) = 0.0
+	do s = -smax, smax
+		rescale_tab(s) = FL_LARGE**s
+	end do
+	rescale_tab(0) = 1.0
+	
+	! Define constants
+	ovflow = rescale_tab(1)
+	unflow = rescale_tab(-1)
+	l_min = l_min_ylm(m, sth)
+	dlog2lg = real(LOG2LG, kind=DP)
+
+	! Computes "lambda_mm"
+	log2val = mfac + m*log(sth) * ALN2_INV     ! "log_2(lambda_mm)"
+	scalel = int (log2val / dlog2lg)
+	corfac = rescale_tab(max(scalel,RSMIN))
+	lam_mm = 2.0**(log2val - scalel * dlog2lg) ! Rescaled "lambda_mm"
+	if (IAND(m,1)>0) lam_mm = -lam_mm          ! Negative for odd "m"
+
+	lam_lm(0:lmax) = 0.0
+	
+	! "l=m"
+	lam_lm(m) = lam_mm * corfac
+
+	! "l>m"
+	lam_0 = 0.0
+	lam_1 = 1.0
+	lam_2 = cth * lam_1 * recfac(0,m)
+	do l = m+1, lmax
+		! Do recursion
+		if (l >= l_min) then
+			lam_lm(l) = lam_2 * corfac * lam_mm
+		end if
+		lam_0 = lam_1 * recfac(1,l-1)
+		lam_1 = lam_2
+		lam_2 = (cth * lam_1 - lam_0) * recfac(0,l)
+
+		! Do dynamic rescaling
+		if (abs(lam_2) > ovflow) then
+			lam_1 = lam_1 * unflow
+			lam_2 = lam_2 * unflow
+			scalel= scalel + 1
+			corfac = rescale_tab(max(scalel,RSMIN))
+		else if (abs(lam_2) < unflow .and. abs(lam_2) /= 0.0) then
+			lam_1 = lam_1 * ovflow
+			lam_2 = lam_2 * ovflow
+			scalel= scalel - 1
+			corfac = rescale_tab(max(scalel,RSMIN))
+		end if
+
+	end do
+end subroutine do_lambda_lm
+
+! Display usage information
 subroutine usage()
-    	write (*,'(/,X,A,/)') "Usage:"
-    	write (*,*) "For Hilbert-Huang transform: hht IFN IMF NIT STF TNS GSP"
-    	write (*,'(X,A,/)') "For finding local extrema: hht -lext IFN STF TNS SMP"
-    	write (*,*) "IFN = Input file name"
-    	write (*,*) "IMF = Number of Intrinsic Mode Functions"
-    	write (*,*) "NIT = Number of iterations in the Empirical Mode Decomposition"
-    	write (*,*) "TNS = Tension parameter"
-    	write (*,*) "GSP = FWHM parameter for Gaussian smoothing (in arcminutes)"
-    	write (*,'(X,A,/)') "STF = Stiffness"
+	write (*,'(/, X, A, /)') "Usage:"
+	write (*,*) "For Hilbert-Huang transform: hht IFN IMF NIT STF TNS GSP"
+	write (*,'(X, A, /)') "For finding local extrema: hht -lext IFN STF TNS SMP"
+	write (*,*) "IFN = Input file name"
+	write (*,*) "IMF = Number of Intrinsic Mode Functions"
+	write (*,*) "NIT = Number of iterations in the Empirical Mode Decomposition"
+	write (*,*) "TNS = Tension parameter"
+	write (*,*) "GSP = FWHM parameter for Gaussian smoothing (in arcminutes)"
+	write (*,'(X, A, /)') "STF = Stiffness"
 	
 end subroutine usage
 
