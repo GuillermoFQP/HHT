@@ -326,8 +326,8 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	! Pixel window function
 	call pixel_window(wl, nside)
 	
-	! Gaussian beam
-	call gaussbeam(dble(fwhm), lmax, bl2)
+	! Gaussian beam for "stff=0"
+	if (stff == 0) call gaussbeam(dble(fwhm), lmax, bl2)
 	
 	write (*,'(/, X, "--- Computing interpolation matrix of dimension ", I0, ".")') next
 	
@@ -336,8 +336,8 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	!$OMP DO SCHEDULE(DYNAMIC)
 	do j = 1, next
 		do i = 1, j
-			!A(i,j) = Aij(dot_product(vec(i,:),vec(j,:)), wl*bl1, lmin, lmax)
-			A(i,j) = G(dot_product(vec(i,:),vec(j,:)), wl*bl1, lmin, lmax)
+			!A(i,j) = Aij(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
+			A(i,j) = G(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
 			if (i /= j) A(j,i) = A(i,j)
 		end do
 	end do
@@ -368,9 +368,9 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		call interp_alms(B, ang, lmax, lmax, alm)
 		
 		! Convolution in harmonic space and generation of output map
-		forall (l=lmin:lmax) alm(1,l,0:l) = alm(1,l,0:l) * wl(l,1) * bl1(l,1) ! * bl2(l,1)
+		forall (l=lmin:lmax) alm(1,l,0:l) = alm(1,l,0:l) * wl(l,1) * bl1(l,1) * bl2(l,1)
 		
-		! "a_00" takes a different value when stff>0 or tens=0
+		! "a_00" takes a different value when "stff>0" or "tens=0"
 		if (lmin == 1) alm(1,0,0) = sqrt(4.0*pi) * sum(LUT) / next
 		
 		write (*,'(X, A)') "--- Generating map."
@@ -443,6 +443,7 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 	real(DP), intent(out) :: imf(0:12*nside**2-1,nimf)
 	integer               :: i, j, k, n, nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
 	real(DP), allocatable :: inp(:), Emax(:), Emin(:)
+	real(DP)              :: stop_crit
 	
 	n = nside2npix(nside) - 1
 	
@@ -452,11 +453,13 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 	do i = 1, nimf
 		write (*,'(/, X, "- Computing Intrinsic Mode Function ", I0, "/", I0, ".")') i, nimf
 		
-		! Iteration number
-		do j = 1, nitr
+		j = 1           ! Iteration number
+		stop_crit = 1.0 ! Stoppage criterion
+		
+		! Sifting process
+		do while (stop_crit >= 2.0E-6 .and. j <= nitr)
 			write (*,'(/, X, "-- Iteration in progress: " I0, "/", I0, ".")') j, nitr
 			
-			! Start sifting process
 			if (j == 1) then
 				inp = map_in
 				if (i /= 1) then
@@ -475,10 +478,16 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 			call ss_interp(nside, lmax, stff, tens, nmax, inp(imax(1:nmax)), imax(1:nmax), Emax)
 			call ss_interp(nside, lmax, stff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
 			
-			write (*,'(/, X, "-- Stop criteria = ", E10.4)') sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
+			! Update stoppage criterion (standard deviation of mean map)
+			stop_crit = sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
+			
+			write (*,'(/, X, "-- Stop criteria = ", E10.4)') stop_crit
 			
 			! Update IMF
 			imf(:,i) = inp - (Emax + Emin) / 2.0
+			
+			! Update iteration number
+			j = j + 1
 		end do
 	end do
 	
@@ -486,7 +495,7 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 	
 end subroutine emd
 
-! Calculation of the elements of the interpolation matrix (fast)
+! Calculation of the elements of the interpolation matrix (unstable)
 pure function G(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
@@ -521,7 +530,7 @@ pure function G(cth, bl, lmin, lmax)
 	
 end function G
 
-! Calculation of the elements of the interpolation matrix (slow)
+! Calculation of the elements of the interpolation matrix (stable)
 function Aij(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
@@ -571,7 +580,7 @@ subroutine gen_mfactor(m_max, m_fact)
 
 end subroutine gen_mfactor
 
-! Generates recursion factors used to computes the "Y_lm" of degree "m" for all "l" in "m<=l<=l_max"
+! Generates recursion factors used to computes the "lambda_lm" of degree "m" for all "l" in "m<=l<=l_max"
 subroutine gen_recfactor( l_max, m, recfac)
 	integer, intent(in)   :: l_max, m
 	real(DP), intent(out) :: recfac(0:1, 0:l_max)
@@ -604,7 +613,7 @@ subroutine init_rescale_tab()
 	
 end subroutine init_rescale_tab
 
-! Computes scalar "lambda_lm(theta)" for all "l" in "[m,lmax]" for a given "m", and given theta
+! Computes scalar "lambda_lm(theta)" for all "l" in "m<=l<=lmax" for a given "m" and a given "theta"
 subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
 	integer, intent(in)   :: lmax,  m
 	real(DP), intent(in)  :: cth, sth, mfac, recfac(0:1,0:lmax)
@@ -666,7 +675,7 @@ subroutine usage()
 	write (*,'(X, A, /)') "For finding local extrema: hht -lext IFN STF TNS SMP"
 	write (*,*) "IFN = Input file name"
 	write (*,*) "IMF = Number of Intrinsic Mode Functions"
-	write (*,*) "NIT = Number of iterations in the Empirical Mode Decomposition"
+	write (*,*) "NIT = Maximum number of iterations in the Empirical Mode Decomposition"
 	write (*,*) "TNS = Tension parameter"
 	write (*,*) "GSP = FWHM parameter for Gaussian smoothing (in arcminutes)"
 	write (*,'(X, A, /)') "STF = Stiffness"
