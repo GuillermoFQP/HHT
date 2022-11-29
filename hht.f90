@@ -15,6 +15,7 @@ character(len=80), allocatable :: fout(:)
 ! Parameters for the calculations of spherical harmonics
 integer, parameter  :: LOG2LG = 100, RSMAX = 20, RSMIN = -20
 real(DP), parameter :: FL_LARGE = 2.0**LOG2LG, FL_SMALL = 2.0**(-LOG2LG), ALN2_INV = 1.4426950408889634073599246810 ! 1/log(2)
+real(DP)            :: rescale_tab(RSMIN:RSMAX)
 !======================================================================================
 
 select case (nArguments())
@@ -262,13 +263,13 @@ subroutine interp_alms(c, ang, lmax, mmax, alm)
 	alm = (0.0, 0.0)
 	
 	! Recursion factors used in "lambda_mm" calculation for all "m" in "0<=m<=m_max"
-	call gen_mfac(mmax, mfac)
+	call gen_mfactor(mmax, mfac)
 	
 	!$OMP PARALLEL PRIVATE(m, i, recfac, lam_lm, l) SHARED(mmax, lmax, c, ang, mfac, alm)
 	!$OMP DO SCHEDULE(DYNAMIC)
 	do m = 0, mmax
 		! Generate recursion factors useful for "lambda_lm" for a given "m"
-		call gen_recfac(lmax, m, recfac)
+		call gen_recfactor(lmax, m, recfac)
 		
 		do i = 1, size(c)
 			! Compute "lam_lm(theta_i)" for all "l>=m" for a given "m"
@@ -290,10 +291,11 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	real(DP), intent(in)      :: LUT(next)
 	real(DP), intent(out)     :: map_out(0:12*nside**2-1)
 	real(DP)                  :: vec(next,3), ang(next,2), vi(3), fwhm
-	integer                   :: i, j, n, l, lmin, omega_pix
+	integer                   :: i, j, n, lmin, omega_pix
 	real(DP), allocatable     :: A(:,:), B(:), bl1(:,:), bl2(:,:), wl(:,:)
 	complex(DPC), allocatable :: alm(:,:,:)
 	logical                   :: harmonic_space
+	integer(I8B)              :: l
 	
 	n = nside2npix(nside) - 1
 	fwhm = 2.0 * acos(1.0 - 2.0/next) * 180.0 * 60.0 / pi
@@ -306,6 +308,9 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		call pix2vec_nest(nside, iext(i), vec(i,:))
 		call pix2ang_nest(nside, iext(i), ang(i,1), ang(i,2))
 	end do
+	
+	! Initialize RESCALE_TAB useful for calculation of spherical harmonics
+	call init_rescale_tab()
 	
 	! Inverse of differential operator in harmonic space
 	if (stff /= 0 .or. tens == 0) then
@@ -331,8 +336,8 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	!$OMP DO SCHEDULE(DYNAMIC)
 	do j = 1, next
 		do i = 1, j
-			!A(i,j) = Aij(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
-			A(i,j) = G(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
+			!A(i,j) = Aij(dot_product(vec(i,:),vec(j,:)), wl*bl1, lmin, lmax)
+			A(i,j) = G(dot_product(vec(i,:),vec(j,:)), wl*bl1, lmin, lmax)
 			if (i /= j) A(j,i) = A(i,j)
 		end do
 	end do
@@ -363,7 +368,7 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		call interp_alms(B, ang, lmax, lmax, alm)
 		
 		! Convolution in harmonic space and generation of output map
-		forall (l=lmin:lmax) alm(1,l,0:l) = alm(1,l,0:l) * wl(l,1) * bl1(l,1) * bl2(l,1)
+		forall (l=lmin:lmax) alm(1,l,0:l) = alm(1,l,0:l) * wl(l,1) * bl1(l,1) ! * bl2(l,1)
 		
 		! "a_00" takes a different value when stff>0 or tens=0
 		if (lmin == 1) alm(1,0,0) = sqrt(4.0*pi) * sum(LUT) / next
@@ -481,12 +486,12 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 	
 end subroutine emd
 
-! Calculation of the elements of the interpolation matrix (unstable)
+! Calculation of the elements of the interpolation matrix (fast)
 pure function G(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
 	real(DP)             :: theta_ij, P(0:2), G
-	integer              :: l
+	integer(I8B)         :: l
 	
 	G = 0.0
 	
@@ -516,21 +521,21 @@ pure function G(cth, bl, lmin, lmax)
 	
 end function G
 
-! Calculation of the elements of the interpolation matrix (stable)
+! Calculation of the elements of the interpolation matrix (slow)
 function Aij(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
 	real(DP)             :: sth, mfac(0:0), recfac(0:1,0:lmax), lam_lm(0:lmax), Aij
-	integer              :: l
+	integer(I8B)         :: l
 	
 	Aij = 0.0
 	sth = sqrt(1.0 - cth**2)
 	
 	! Recursion factor used in "lambda_00" calculation
-	call gen_mfac(0, mfac)
+	call gen_mfactor(0, mfac)
 	
 	! Generate recursion factors useful for "lambda_l0"
-	call gen_recfac(lmax, 0, recfac)
+	call gen_recfactor(lmax, 0, recfac)
 	
 	if (cth < 1.0 - epsilon(cth)) then
 		! Compute "lambda_l0(theta_ij)=sqrt((2*l+1)/4*pi)*Pl(cos(theta_ij))" for all "l" for "m=0"
@@ -547,22 +552,65 @@ function Aij(cth, bl, lmin, lmax)
 	
 end function Aij
 
-! Computes scalar "lambda_lm(theta)" for all "l" in "[m,lmax]" for a given "m", and given theta
-subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
-	integer, intent(in)   :: lmax,  m
-	real(DP), intent(in)  :: cth, sth, mfac, recfac(0:1,0:lmax)
-	real(DP), intent(out) :: lam_lm(0:lmax)
-	real(DP)              :: log2val, dlog2lg, ovflow, unflow, corfac, lam_mm, lam_0, lam_1, lam_2, logOVFLOW, rescale_tab(RSMIN:RSMAX)
-	integer               :: scalel, l, l_min, s, smax
+! Generates factor used in "lambda_mm" calculation for all "m" in "0<=m<=m_max"
+subroutine gen_mfactor(m_max, m_fact)
+	integer, intent(in)   :: m_max
+	real(DP), intent(out) :: m_fact(0:m_max)
+	integer               :: m
+
+	! fact(m) = fact(m-1) * sqrt((2m+1)/(2m))
+	m_fact(0) = 1.0
+	do m = 1, m_max
+		m_fact(m) = m_fact(m-1) * sqrt(dble(2*m+1) / dble(2*m))
+	end do
+
+	! Log_2 ( fact(m) / sqrt(4 Pi) )
+	do m=0,m_max
+		m_fact(m) = log(SQ4PI_INV * m_fact(m)) * ALN2_INV
+	enddo
+
+end subroutine gen_mfactor
+
+! Generates recursion factors used to computes the "Y_lm" of degree "m" for all "l" in "m<=l<=l_max"
+subroutine gen_recfactor( l_max, m, recfac)
+	integer, intent(in)   :: l_max, m
+	real(DP), intent(out) :: recfac(0:1, 0:l_max)
+	real(DP)              :: fm2, fl2
+	integer               :: l
+
+	recfac(0:1,0:m) = 0.0
+	fm2 = dble(m)**2
+	do l = m, l_max
+		fl2 = dble(l+1)**2
+		recfac(0,l) = sqrt((4.0*fl2-1.0) / (fl2-fm2))
+	end do
+	! Put outside the loop because of problem on some compilers
+	recfac(1,m:l_max) = 1.0 / recfac(0,m:l_max)
+
+end subroutine gen_recfactor
+
+! Initialize RESCALE_TAB array
+subroutine init_rescale_tab()
+	integer           :: s, smax
+	real(DP)          :: logOVFLOW
 	
-	! Initialize RESCALE_TAB array
-	logOVFLOW = log(FL_LARGE)
-	smax = INT( log(MAX_DP) / logOVFLOW )
+	logOVFLOW=log(FL_LARGE)
+	smax = int(log(MAX_DP) / logOVFLOW)
 	rescale_tab(RSMIN:RSMAX) = 0.0
 	do s = -smax, smax
 		rescale_tab(s) = FL_LARGE**s
 	end do
 	rescale_tab(0) = 1.0
+	
+end subroutine init_rescale_tab
+
+! Computes scalar "lambda_lm(theta)" for all "l" in "[m,lmax]" for a given "m", and given theta
+subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
+	integer, intent(in)   :: lmax,  m
+	real(DP), intent(in)  :: cth, sth, mfac, recfac(0:1,0:lmax)
+	real(DP), intent(out) :: lam_lm(0:lmax)
+	real(DP)              :: log2val, dlog2lg, ovflow, unflow, corfac, lam_mm, lam_0, lam_1, lam_2
+	integer               :: scalel, l, l_min
 	
 	! Define constants
 	ovflow = rescale_tab(1)
@@ -572,7 +620,7 @@ subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
 
 	! Computes "lambda_mm"
 	log2val = mfac + m*log(sth) * ALN2_INV     ! "log_2(lambda_mm)"
-	scalel = int (log2val / dlog2lg)
+	scalel = int(log2val / dlog2lg)
 	corfac = rescale_tab(max(scalel,RSMIN))
 	lam_mm = 2.0**(log2val - scalel * dlog2lg) ! Rescaled "lambda_mm"
 	if (IAND(m,1)>0) lam_mm = -lam_mm          ! Negative for odd "m"
@@ -599,12 +647,12 @@ subroutine do_lambda_lm(lmax, m, cth, sth, mfac, recfac, lam_lm)
 		if (abs(lam_2) > ovflow) then
 			lam_1 = lam_1 * unflow
 			lam_2 = lam_2 * unflow
-			scalel= scalel + 1
+			scalel = scalel + 1
 			corfac = rescale_tab(max(scalel,RSMIN))
 		else if (abs(lam_2) < unflow .and. abs(lam_2) /= 0.0) then
 			lam_1 = lam_1 * ovflow
 			lam_2 = lam_2 * ovflow
-			scalel= scalel - 1
+			scalel = scalel - 1
 			corfac = rescale_tab(max(scalel,RSMIN))
 		end if
 
