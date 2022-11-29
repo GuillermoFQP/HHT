@@ -60,14 +60,12 @@ select case (nArguments())
 		read(arg,*) fwhm
 		
 		! Output file names
-		ch = 2*imf
-		allocate(fout(ch))
+		ch = imf
+		allocate(fout(2*ch))
 		
-		do i = 1, imf
+		do i = 1, ch
 			write (fout(i),'("imf",I0,".fits")') i
-		end do
-		do i = imf+1, ch
-			write (fout(i),'("res",I0,".fits")') i - imf
+			write (fout(ch+i),'("res",I0,".fits")') i
 		end do
 	case default
 		call fatal_error("Invalid number of arguments.")
@@ -76,7 +74,7 @@ end select
 ! Parameters of the FITS file containing the input map
 npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord)
 n = nside2npix(nside) - 1
-lmax = 3*nside-1
+lmax = min(3*nside - 1, 2*2048)
 
 write (*,'(/,X, "Input map Nside = ", I0)') nside
 
@@ -100,7 +98,7 @@ if (nArguments() == 5) then
 	write (*,'(/, X, A)') "Extrema and envelopes obtained successfully."
 else
 	call emd(nside, map_in(:,1), imf, nit, stff, tens, lmax, fwhm, map_out(:,1,:))
-	write (*,*) "Empirical Mode Decomposition completed successfully."
+	write (*,'(/, X, A)') "Empirical Mode Decomposition completed successfully."
 end if
 
 ! Go back to RING ordering if necessary
@@ -117,10 +115,11 @@ do i = 1, ch
 	call output_map(map_out(:,:,i), header, fout(i))
 end do
 
-! Generating file containing the EMD and the residual
+! Generating files containing the residues and the EMD
 if (nArguments() == 6) then
-	call output_map(map_out(:,:,2*imf)+sum(map_out(:,:,1:imf),dim=3), header, "emd.fits")
-	call output_map(map_in-map_out(:,:,2*imf)-sum(map_out(:,:,1:imf),dim=3), header, "res.fits")
+	do i = 1, ch
+		call output_map(map_in - sum(map_out(:,:,1:i),dim=3), header, fout(ch+i))
+	end do
 end if
 write (*,*) "Output files generated successfully."
 
@@ -297,7 +296,7 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	logical                   :: harmonic_space
 	
 	n = nside2npix(nside) - 1
-	fwhm = acos(1.0 - 2.0/next) * 180.0 * 60.0 / pi
+	fwhm = 2.0 * acos(1.0 - 2.0/next) * 180.0 * 60.0 / pi
 	
 	allocate(A(next,next), B(next), source=0.0)                      ! System of linear equations
 	allocate(bl1(0:lmax,1), bl2(0:lmax,1), wl(0:lmax,1), source=1.0) ! Beams
@@ -317,7 +316,7 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		bl1(0,1) = -1.0 / tens
 	end if
 	
-	forall (l=1:lmax) bl1(l,1) = (-1.0)**(stff+1) / ((l*(l+1) + tens) * (l*(l+1))**stff)
+	forall (l=1:lmax) bl1(l,1) = dble((-1)**(stff+1)) / dble((l*(l+1) + tens) * (l*(l+1))**stff)
 	
 	! Pixel window function
 	call pixel_window(wl, nside)
@@ -332,8 +331,8 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	!$OMP DO SCHEDULE(DYNAMIC)
 	do j = 1, next
 		do i = 1, j
-			A(i,j) = Aij(vec(i,:), vec(j,:), wl*bl1*bl2, lmin, lmax)
-			!A(i,j) = G(vec(i,:), vec(j,:), wl*bl1, lmin, lmax)
+			!A(i,j) = Aij(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
+			A(i,j) = G(dot_product(vec(i,:),vec(j,:)), wl*bl1*bl2, lmin, lmax)
 			if (i /= j) A(j,i) = A(i,j)
 		end do
 	end do
@@ -394,8 +393,8 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 			
 			! Calculation of the interpolated value
 			do j = 1, next
-				map_out(i) = map_out(i) + B(j) * Aij(vi, vec(j,:), wl*bl1, lmin, lmax)
-				!map_out(i) = map_out(i) + B(j) * G(vi, vec(j,:), wl*bl1, lmin, lmax)
+				map_out(i) = map_out(i) + B(j) * Aij(dot_product(vi,vec(j,:)), wl*bl1*bl2, lmin, lmax)
+				!map_out(i) = map_out(i) + B(j) * G(dot_product(vi,vec(j,:)), wl*bl1*bl2, lmin, lmax)
 			end do
 		end do
 		!$OMP END DO
@@ -433,32 +432,36 @@ subroutine extrema(nside, map_in, stff, tens, lmax, fwhm, map_out)
 end subroutine extrema
 
 ! Empirical Mode Decomposition process
-subroutine emd(nside, map_in, imf, nit, stff, tens, lmax, fwhm, map_out)
-	integer, intent(in)   :: nside, imf, nit, stff, tens, lmax, fwhm
+subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
+	integer, intent(in)   :: nside, nimf, nitr, stff, tens, lmax, fwhm
 	real(DP), intent(in)  :: map_in(0:12*nside**2-1)
-	real(DP), intent(out) :: map_out(0:12*nside**2-1,2*imf)
-	integer               :: p, i, j, n, nlist, nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
+	real(DP), intent(out) :: imf(0:12*nside**2-1,nimf)
+	integer               :: i, j, k, n, nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
 	real(DP), allocatable :: inp(:), Emax(:), Emin(:)
 	
 	n = nside2npix(nside) - 1
 	
+	allocate(inp(0:n), Emax(0:n), Emin(0:n), source=0.0)
+	
 	! IMF number
-	do i = 1, imf
-		write (*,'(/, X, "- Computing Intrinsic Mode Function ", I0, "/", I0, ".")') i, imf
-		
-		! Initialize residue
-		if (i == 1) map_out(:,imf+i) = map_in
-		if (i /= 1) map_out(:,imf+i) = map_out(:,imf+i-1)
+	do i = 1, nimf
+		write (*,'(/, X, "- Computing Intrinsic Mode Function ", I0, "/", I0, ".")') i, nimf
 		
 		! Iteration number
-		do j = 1, nit
-			write (*,'(/, X, "-- Iteration in progress: " I0, "/", I0, ".")') j, nit
-			
-			allocate(inp(0:n), Emax(0:n), Emin(0:n), source=0.0)
+		do j = 1, nitr
+			write (*,'(/, X, "-- Iteration in progress: " I0, "/", I0, ".")') j, nitr
 			
 			! Start sifting process
-			if (j == 1) inp = map_out(:,imf+i)
-			if (j /= 1) inp = map_out(:,i)
+			if (j == 1) then
+				inp = map_in
+				if (i /= 1) then
+					do k = 1, i - 1
+						inp = inp - imf(:,k)
+					end do
+				end if
+			else
+				inp = imf(:,i)
+			end if
 			
 			! Finding the positions and values of the local extrema of the input map
 			call local_extrema(nside, inp, nmax, nmin, imax, imin)
@@ -467,69 +470,61 @@ subroutine emd(nside, map_in, imf, nit, stff, tens, lmax, fwhm, map_out)
 			call ss_interp(nside, lmax, stff, tens, nmax, inp(imax(1:nmax)), imax(1:nmax), Emax)
 			call ss_interp(nside, lmax, stff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
 			
-			write (*,'(/, 3X, "Stop criteria = ", E10.4)') sum(abs((Emax + Emin) / 2.0)**2 / inp**2)
+			write (*,'(/, X, "-- Stop criteria = ", E10.4)') sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
 			
 			! Update IMF
-			map_out(:,i) = inp - (Emax + Emin) / 2.0
-			
-			deallocate(inp, Emax, Emin)
+			imf(:,i) = inp - (Emax + Emin) / 2.0
 		end do
-		
-		! Update residue
-		map_out(:,imf+i) = map_out(:,imf+i) - map_out(:,i)
 	end do
+	
+	deallocate(inp, Emax, Emin)
 	
 end subroutine emd
 
 ! Calculation of the elements of the interpolation matrix (unstable)
-function G(vi, vj, bl, lmin, lmax)
+pure function G(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
-	real(DP), intent(in) :: vi(3), vj(3), bl(0:lmax,1)
+	real(DP), intent(in) :: cth, bl(0:lmax,1)
 	real(DP)             :: theta_ij, P(0:2), G
 	integer              :: l
 	
-	! Angular distance between input positions
-	call angdist(vi, vj, theta_ij)
-	
 	G = 0.0
 	
-	if (theta_ij > epsilon(theta_ij)) then
+	if (cth < 1.0 - epsilon(cth)) then
 		P(0) = 1.0
-		P(1) = cos(theta_ij)
+		P(1) = cth
 		
 		! Initial terms of summation
-		if (lmin == 0) G = G + P(0) * bl(0,1) / (4*pi)
-		if (lmin <= 1) G = G + P(1) * bl(1,1) * 3 / (4*pi)
+		if (lmin == 0) G = G + P(0) * bl(0,1) / (4.0*pi)
+		if (lmin <= 1) G = G + P(1) * bl(1,1) * 3.0 / (4.0*pi)
 		
 		! Summation
 		do l = 2, lmax
-			P(mod(l,3)) = ((2*l-1) * cos(theta_ij) * P(mod(l-1,3)) - (l-1) * P(mod(l-2,3))) / l
-			if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * (2*l+1) / (4*pi)
+			P(mod(l,3)) = (dble(2*l-1) * cth * P(mod(l-1,3)) - dble(l-1) * P(mod(l-2,3))) / l
+			if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * dble(2*l+1) / (4.0*pi)
 		end do
 	else
 		! Initial terms of summation
-		if (lmin == 0) G = G + bl(0,1) / (4*pi)
-		if (lmin <= 1) G = G + bl(1,1) * 3 / (4*pi)
+		if (lmin == 0) G = G + bl(0,1) / (4.0*pi)
+		if (lmin <= 1) G = G + bl(1,1) * 3.0 / (4.0*pi)
 		
 		! Summation
 		do l = 2, lmax
-			if (l >= lmin) G = G + bl(l,1) * (2*l+1) / (4*pi)
+			if (l >= lmin) G = G + bl(l,1) * dble(2*l+1) / (4.0*pi)
 		end do
 	end if
 	
 end function G
 
 ! Calculation of the elements of the interpolation matrix (stable)
-function Aij(vi, vj, bl, lmin, lmax)
+function Aij(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
-	real(DP), intent(in) :: vi(3), vj(3), bl(0:lmax,1)
-	real(DP)             :: theta_ij, mfac(0:0), recfac(0:1,0:lmax), lam_lm(0:lmax), Aij
+	real(DP), intent(in) :: cth, bl(0:lmax,1)
+	real(DP)             :: sth, mfac(0:0), recfac(0:1,0:lmax), lam_lm(0:lmax), Aij
 	integer              :: l
 	
 	Aij = 0.0
-	
-	! Angular distance between input positions
-	call angdist(vi, vj, theta_ij)
+	sth = sqrt(1.0 - cth**2)
 	
 	! Recursion factor used in "lambda_00" calculation
 	call gen_mfac(0, mfac)
@@ -537,17 +532,17 @@ function Aij(vi, vj, bl, lmin, lmax)
 	! Generate recursion factors useful for "lambda_l0"
 	call gen_recfac(lmax, 0, recfac)
 	
-	if (theta_ij > epsilon(theta_ij)) then
+	if (cth < 1.0 - epsilon(cth)) then
 		! Compute "lambda_l0(theta_ij)=sqrt((2*l+1)/4*pi)*Pl(cos(theta_ij))" for all "l" for "m=0"
-		call do_lambda_lm(lmax, 0, abs(cos(theta_ij)), sin(theta_ij), mfac(0), recfac, lam_lm)
-		if (cos(theta_ij) < 0.0) forall (l=0:lmax) lam_lm(l) = (-1.0)**l * lam_lm(l)
+		call do_lambda_lm(lmax, 0, abs(cth), sth, mfac(0), recfac, lam_lm)
+		if (cth < 0.0) forall (l=0:lmax) lam_lm(l) = dble((-1)**l) * lam_lm(l)
 	else
-		forall (l=0:lmax) lam_lm(l) = sqrt((2.0*l+1.0) / (4.0*pi))
+		forall (l=0:lmax) lam_lm(l) = sqrt(dble(2*l+1) / (4.0*pi))
 	end if
 	
 	! Compute summation
 	do l = lmin, lmax
-		Aij = Aij + bl(l,1) * sqrt((2.0*l+1.0) / (4.0*pi)) * lam_lm(l)
+		Aij = Aij + bl(l,1) * sqrt(dble(2*l+1) / (4.0*pi)) * lam_lm(l)
 	end do
 	
 end function Aij
