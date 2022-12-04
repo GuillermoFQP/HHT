@@ -1,4 +1,4 @@
-! Empirical Mode Decomposition for HEALPix maps 
+! Empirical Mode Decomposition for HEALPix maps
 
 program hht
 
@@ -8,7 +8,8 @@ implicit none
 
 !======================================================================================
 real(DP), allocatable          :: map_in(:,:), map_out(:,:,:)
-integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stff, tens, fwhm, lmax
+real(DP)                       :: bl_min, fwhm_rad
+integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stff, tens, fwhm, lmax, lmax_beam
 character(len=80)              :: fin, arg, header(43)
 character(len=80), allocatable :: fout(:)
 !======================================================================================
@@ -34,9 +35,9 @@ select case (nArguments())
 		call getArgument(2, fin)
 		call getArgument(3, arg) ! Stiffness
 		read(arg,*) stff
-        call getArgument(4, arg) ! Tension parameter
+		call getArgument(4, arg) ! Tension parameter
 		read(arg,*) tens
-        call getArgument(5, arg) ! FWHM for Gaussian smoothing
+		call getArgument(5, arg) ! FWHM for Gaussian smoothing (in arcmin)
 		read(arg,*) fwhm
 		
 		! Output file names
@@ -55,9 +56,9 @@ select case (nArguments())
 		read(arg,*) nit
 		call getArgument(4, arg) ! Stiffness
 		read(arg,*) stff
-        call getArgument(5, arg) ! Tension parameter
+		call getArgument(5, arg) ! Tension parameter
 		read(arg,*) tens
-        call getArgument(6, arg) ! FWHM for Gaussian smoothing
+		call getArgument(6, arg) ! FWHM for Gaussian smoothing (in arcmin)
 		read(arg,*) fwhm
 		
 		! Output file names
@@ -74,8 +75,12 @@ end select
 
 ! Parameters of the FITS file containing the input map
 npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord)
-n = nside2npix(nside) - 1
-lmax = min(3*nside - 1, 2*2048)
+
+n = nside2npix(nside) - 1                                            ! Total number of pixels minus one
+fwhm_rad = (dble(fwhm)/60.0) * (pi/180.0)                            ! FWHM parameter in radians
+bl_min = 1.0D-10                                                     ! Cutoff value for Gaussian beam
+lcut = int(sqrt(0.25 - 16.0*log(bl_min)*log(2.0)/fwhm_rad**2) - 0.5) ! Cutoff value for "l" due to Gaussian beam
+lmax = min(3*nside - 1, lcut, 4000)                                  ! Maximum "l" for interpolation
 
 write (*,'(/,X, "Input map Nside = ", I0)') nside
 
@@ -87,7 +92,7 @@ call input_map(fin, map_in, npix, nmaps)
 write (*,'(/,X,A)') "Map read successfully."
 
 ! Gaussian smoothing the input map
-if (fwhm /= 0) call smoothing(nside, ord, lmax, map_in(:,1), fwhm)
+if (fwhm /= 0) call smoothing(nside, ord, 3*nside-1, map_in(:,1), fwhm)
 
 ! All the following subroutines are designed for maps in NESTED ordering
 if (ord == 1) call convert_ring2nest(nside, map_in)
@@ -291,11 +296,10 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 	real(DP), intent(in)      :: LUT(next)
 	real(DP), intent(out)     :: map_out(0:12*nside**2-1)
 	real(DP)                  :: vec(next,3), ang(next,2), vi(3), fwhm
-	integer                   :: i, j, n, lmin, omega_pix
+	integer                   :: i, j, n, l, lmin, omega_pix
 	real(DP), allocatable     :: A(:,:), B(:), bl1(:,:), bl2(:,:), wl(:,:)
 	complex(DPC), allocatable :: alm(:,:,:)
 	logical                   :: harmonic_space
-	integer(I8B)              :: l
 	
 	n = nside2npix(nside) - 1
 	fwhm = 2.0 * acos(1.0 - 2.0/next) * 180.0 * 60.0 / pi
@@ -321,7 +325,7 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		bl1(0,1) = -1.0 / tens
 	end if
 	
-	forall (l=1:lmax) bl1(l,1) = dble((-1)**(stff+1)) / dble((l*(l+1) + tens) * (l*(l+1))**stff)
+	forall (l=1:lmax) bl1(l,1) = dble((-1)**(stff+1)) / (dble(l*(l+1.0) + tens) * dble(l*(l+1.0))**stff)
 	
 	! Pixel window function
 	call pixel_window(wl, nside)
@@ -500,7 +504,7 @@ pure function G(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
 	real(DP)             :: theta_ij, P(0:2), G
-	integer(I8B)         :: l
+	integer              :: l
 	
 	G = 0.0
 	
@@ -514,7 +518,7 @@ pure function G(cth, bl, lmin, lmax)
 		
 		! Summation
 		do l = 2, lmax
-			P(mod(l,3)) = (dble(2*l-1) * cth * P(mod(l-1,3)) - dble(l-1) * P(mod(l-2,3))) / l
+			P(mod(l,3)) = (dble(2*l-1) * cth * P(mod(l-1,3)) - dble(l-1) * P(mod(l-2,3))) / dble(l)
 			if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * dble(2*l+1) / (4.0*pi)
 		end do
 	else
@@ -535,7 +539,7 @@ function Aij(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
 	real(DP)             :: sth, mfac(0:0), recfac(0:1,0:lmax), lam_lm(0:lmax), Aij
-	integer(I8B)         :: l
+	integer              :: l
 	
 	Aij = 0.0
 	sth = sqrt(1.0 - cth**2)
