@@ -9,7 +9,7 @@ implicit none
 !======================================================================================
 real(DP), allocatable          :: map_in(:,:), map_out(:,:,:)
 real(DP)                       :: bl_min, fwhm_rad
-integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stff, tens, fwhm, lmax, lmax_beam
+integer                        :: nside, npix, nmaps, ord, n, imf, nit, ch, i, stff, tens, fwhm, lmax, lcut
 character(len=80)              :: fin, arg, header(43)
 character(len=80), allocatable :: fout(:)
 !======================================================================================
