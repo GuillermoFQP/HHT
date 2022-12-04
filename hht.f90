@@ -1,4 +1,5 @@
 ! Empirical Mode Decomposition for HEALPix maps
+! Run "./hht -h" to display detailed usage information.
 
 program hht
 
@@ -78,7 +79,7 @@ npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord)
 
 n = nside2npix(nside) - 1                                            ! Total number of pixels minus one
 fwhm_rad = (dble(fwhm)/60.0) * (pi/180.0)                            ! FWHM parameter in radians
-bl_min = 1.0D-10                                                     ! Cutoff value for Gaussian beam
+bl_min = 1.0D-8                                                      ! Cutoff value for Gaussian beam
 lcut = int(sqrt(0.25 - 16.0*log(bl_min)*log(2.0)/fwhm_rad**2) - 0.5) ! Cutoff value for "l" due to Gaussian beam
 lmax = min(3*nside - 1, lcut, 4000)                                  ! Maximum "l" for interpolation
 
@@ -447,7 +448,7 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 	real(DP), intent(out) :: imf(0:12*nside**2-1,nimf)
 	integer               :: i, j, k, n, nmax, nmin, imax(12*nside**2/9), imin(12*nside**2/9)
 	real(DP), allocatable :: inp(:), Emax(:), Emin(:)
-	real(DP)              :: stop_crit
+	real(DP)              :: mean_stdv, stop_crit
 	
 	n = nside2npix(nside) - 1
 	
@@ -458,10 +459,11 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 		write (*,'(/, X, "- Computing Intrinsic Mode Function ", I0, "/", I0, ".")') i, nimf
 		
 		j = 1           ! Iteration number
-		stop_crit = 1.0 ! Stoppage criterion
+		mean_stdv = 1.0 ! Standard deviation of the mean map
+		stop_crit = 0.0 ! Stoppage criterion (sifting process will stop if MEAN_STDV is less than STOP_CRIT)
 		
 		! Sifting process
-		do while (stop_crit >= 2.0E-6 .and. j <= nitr)
+		do while (mean_stdv >= stop_crit .and. j <= nitr)
 			write (*,'(/, X, "-- Iteration in progress: " I0, "/", I0, ".")') j, nitr
 			
 			if (j == 1) then
@@ -483,9 +485,10 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 			call ss_interp(nside, lmax, stff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
 			
 			! Update stoppage criterion (standard deviation of mean map)
-			stop_crit = sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
+			if (j >= 2) mean_stdv = sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
+			if (j == 2) stop_crit = mean_stdv / 10.0
 			
-			write (*,'(/, X, "-- Stop criteria = ", E10.4)') stop_crit
+			if (j >= 2) write (*,'(/, X, "-- Mean SD = ", E10.4, /, X, "-- Stop criteria: SD <= ", E10.4)') mean_stdv, stop_crit
 			
 			! Update IMF
 			imf(:,i) = inp - (Emax + Emin) / 2.0
