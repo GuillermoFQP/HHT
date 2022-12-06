@@ -79,9 +79,9 @@ npix = getsize_fits(fin, nmaps=nmaps, nside=nside, ordering=ord)
 
 n = nside2npix(nside) - 1                                            ! Total number of pixels minus one
 fwhm_rad = (dble(fwhm)/60.0) * (pi/180.0)                            ! FWHM parameter in radians
-bl_min = 1.0D-8                                                      ! Cutoff value for Gaussian beam
+bl_min = 1.0D-7                                                      ! Cutoff value for Gaussian beam
 lcut = int(sqrt(0.25 - 16.0*log(bl_min)*log(2.0)/fwhm_rad**2) - 0.5) ! Cutoff value for "l" due to Gaussian beam
-lmax = min(3*nside - 1, lcut, 4000)                                  ! Maximum "l" for interpolation
+lmax = min(3*nside - 1, lcut, 2*2048)                                ! Maximum "l" for interpolation
 
 write (*,'(/,X, "Input map Nside = ", I0)') nside
 
@@ -182,8 +182,8 @@ subroutine local_extrema(nside, map_in, nmax, nmin, imax, imin)
 		! Finding local extrema using disk with given radius
 		!======================================================================================
 		rpix = sqrt(4.0*pi/(n+1)) / sqrt(2.0) ! Approximate radius of one pixel
-		radius = 5.0*rpix                       ! Disk radius
-		l = (2.0*radius)**2 / (4.0*pi/(n+1))    ! Approximate number of pixels inside the disk
+		radius = 5.0*rpix                     ! Disk radius
+		l = (2.0*radius)**2 / (4.0*pi/(n+1))  ! Approximate number of pixels inside the disk
 		
 		allocate(list(0:l))
 		
@@ -323,10 +323,10 @@ subroutine ss_interp(nside, lmax, stff, tens, next, LUT, iext, map_out)
 		bl1(0,1) = 1.0
 	else
 		lmin = 0
-		bl1(0,1) = -1.0 / tens
+		bl1(0,1) = -1.0 / dble(tens)
 	end if
 	
-	forall (l=1:lmax) bl1(l,1) = dble((-1)**(stff+1)) / (dble(l*(l+1.0) + tens) * dble(l*(l+1.0))**stff)
+	forall (l=1:lmax) bl1(l,1) = (-1.0)**(stff+1) / (dble(l)*dble(l+1) + dble(tens)) / (dble(l)*dble(l+1))**stff
 	
 	! Pixel window function
 	call pixel_window(wl, nside)
@@ -484,11 +484,14 @@ subroutine emd(nside, map_in, nimf, nitr, stff, tens, lmax, fwhm, imf)
 			call ss_interp(nside, lmax, stff, tens, nmax, inp(imax(1:nmax)), imax(1:nmax), Emax)
 			call ss_interp(nside, lmax, stff, tens, nmin, inp(imin(1:nmin)), imin(1:nmin), Emin)
 			
-			! Update stoppage criterion (standard deviation of mean map)
-			if (j >= 2) mean_stdv = sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
-			if (j == 2) stop_crit = mean_stdv / 10.0
+			! Update standard deviation of mean map
+			mean_stdv = sqrt(sum(abs((Emax + Emin) / 2.0)**2) / dble(n+1))
 			
-			if (j >= 2) write (*,'(/, X, "-- Mean SD = ", E10.4, /, X, "-- Stop criteria: SD <= ", E10.4)') mean_stdv, stop_crit
+			! Stoppage criterion
+			if (j == 2) stop_crit = mean_stdv / 3.0
+			
+			write (*,'(/, X,          "-- Mean map standard deviation: SD = ", E10.4)') mean_stdv
+			if (j >= 2) write (*,'(X, "-- Stoppage criteria:           SD < ", E10.4)') stop_crit
 			
 			! Update IMF
 			imf(:,i) = inp - (Emax + Emin) / 2.0
@@ -506,34 +509,22 @@ end subroutine emd
 pure function G(cth, bl, lmin, lmax)
 	integer, intent(in)  :: lmin, lmax
 	real(DP), intent(in) :: cth, bl(0:lmax,1)
-	real(DP)             :: theta_ij, P(0:2), G
+	real(DP)             :: P(0:2), G
 	integer              :: l
 	
 	G = 0.0
+	P(0) = 1.0
+	P(1) = cth
 	
-	if (cth < 1.0 - epsilon(cth)) then
-		P(0) = 1.0
-		P(1) = cth
-		
-		! Initial terms of summation
-		if (lmin == 0) G = G + P(0) * bl(0,1) / (4.0*pi)
-		if (lmin <= 1) G = G + P(1) * bl(1,1) * 3.0 / (4.0*pi)
-		
-		! Summation
-		do l = 2, lmax
-			P(mod(l,3)) = (dble(2*l-1) * cth * P(mod(l-1,3)) - dble(l-1) * P(mod(l-2,3))) / dble(l)
-			if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * dble(2*l+1) / (4.0*pi)
-		end do
-	else
-		! Initial terms of summation
-		if (lmin == 0) G = G + bl(0,1) / (4.0*pi)
-		if (lmin <= 1) G = G + bl(1,1) * 3.0 / (4.0*pi)
-		
-		! Summation
-		do l = 2, lmax
-			if (l >= lmin) G = G + bl(l,1) * dble(2*l+1) / (4.0*pi)
-		end do
-	end if
+	! Initial terms of summation
+	if (lmin == 0) G = G + P(0) * bl(0,1) / (4.0*pi)
+	if (lmin <= 1) G = G + P(1) * bl(1,1) * 3.0 / (4.0*pi)
+	
+	! Summation
+	do l = 2, lmax
+		P(mod(l,3)) = (dble(2*l-1) * cth * P(mod(l-1,3)) - dble(l-1) * P(mod(l-2,3))) / dble(l)
+		if (l >= lmin) G = G + P(mod(l,3)) * bl(l,1) * dble(2*l+1) / (4.0*pi)
+	end do
 	
 end function G
 
@@ -553,13 +544,15 @@ function Aij(cth, bl, lmin, lmax)
 	! Generate recursion factors useful for "lambda_l0"
 	call gen_recfactor(lmax, 0, recfac)
 	
-	if (cth < 1.0 - epsilon(cth)) then
-		! Compute "lambda_l0(theta_ij)=sqrt((2*l+1)/4*pi)*Pl(cos(theta_ij))" for all "l" for "m=0"
+	! Compute "lambda_l0(theta_ij)=sqrt((2*l+1)/4*pi)*Pl(cos(theta_ij))" for all "l" for "m=0"
+	if (sth > epsilon(sth)) then
 		call do_lambda_lm(lmax, 0, abs(cth), sth, mfac(0), recfac, lam_lm)
-		if (cth < 0.0) forall (l=0:lmax) lam_lm(l) = dble((-1)**l) * lam_lm(l)
 	else
 		forall (l=0:lmax) lam_lm(l) = sqrt(dble(2*l+1) / (4.0*pi))
 	end if
+	
+	! Parity
+	if (cth < 0.0) forall (l=0:lmax) lam_lm(l) = (-1.0)**l * lam_lm(l)
 	
 	! Compute summation
 	do l = lmin, lmax
@@ -600,6 +593,7 @@ subroutine gen_recfactor( l_max, m, recfac)
 		fl2 = dble(l+1)**2
 		recfac(0,l) = sqrt((4.0*fl2-1.0) / (fl2-fm2))
 	end do
+	
 	! Put outside the loop because of problem on some compilers
 	recfac(1,m:l_max) = 1.0 / recfac(0,m:l_max)
 
